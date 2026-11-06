@@ -259,7 +259,9 @@ if [ ! -f "$PREFIX/lib/libopenblas.so" ]; then
     sed -i 's/#if defined (__LSB_VERSION__) || defined(ARCH_ZARCH)/#if defined (__LSB_VERSION__) || defined(ARCH_ZARCH) || defined(PYOHOS_NO_NUMA_SYSCALLS)/' common_linux.h
     [ "$(grep -c 'PYOHOS_NO_NUMA_SYSCALLS' common_linux.h)" -ge 2 ] || {
       echo "错误：OpenBLAS seccomp 补丁未命中（common_linux.h 结构可能变了）。" >&2; exit 1; }
-    make -j"$(nproc)" TARGET=ARMV8 BINARY=64 NOFORTRAN=1 NO_LAPACK=1 NO_SHARED=1 \
+    # make libs = 只编库不编 utest（utest 可执行要链宿主侧跑、且 musl 无
+    # pthread_setaffinity_np 必挂——库本体第四轮已实证编得出）
+    make -j"$(nproc)" libs TARGET=ARMV8 BINARY=64 NOFORTRAN=1 NO_LAPACK=1 NO_SHARED=1 \
       NO_AFFINITY=1 BUILD_WITHOUT_LAPACKE=1 \
       CC="$CC" AR="$AR" RANLIB="$RANLIB" HOSTCC=gcc \
       CFLAGS="--sysroot=$SYSROOT -O2 -fPIC -DPYOHOS_NO_NUMA_SYSCALLS" \
