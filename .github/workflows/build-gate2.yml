@@ -129,6 +129,21 @@ jobs:
           PY_DEPS_PREFIX="$HOME/ohos-py-deps/prefix" \
           bash factory/build-cpython-ohos.sh
 
+      # 失败诊断：deps 形态探测证据（ssl/ffi/ctypes 的 configure 探测段 + deps prefix 实况）
+      - name: Dump configure probe evidence (on failure)
+        if: failure()
+        run: |
+          CFG="$HOME/cpython-ohos-3.13.18/configure.log"
+          echo "== deps prefix 实况 =="
+          ls -la "$HOME/ohos-py-deps/prefix/lib" | head -30
+          ls "$HOME/ohos-py-deps/prefix/include" | head -20
+          ls "$HOME/ohos-py-deps/prefix/include/openssl" 2>/dev/null | head -5 || echo "缺 include/openssl"
+          ls "$HOME/ohos-py-deps/prefix/lib/pkgconfig" 2>/dev/null
+          echo "== configure.log 里 ssl/ffi/ctypes 探测段 =="
+          grep -n -i -B2 -A4 'openssl\|ssl\|ffi\|ctypes' "$CFG" | head -80 || true
+          echo "== configure.log 尾部 40 行 =="
+          tail -40 "$CFG"
+
       - name: Verify artifacts (gate2 form)
         run: |
           set -euxo pipefail
