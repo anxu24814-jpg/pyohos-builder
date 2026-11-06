@@ -209,6 +209,13 @@ echo "== 重链 libpython（SONAME=libpython$SOVER.so）与全部扩展"
 # 不能用宿主 python 的 sysconfig（x86_64），否则 rm 不到任何模块、等于没重链。
 EXT_SUFFIX="$(grep -m1 '^EXT_SUFFIX=' Makefile | cut -d= -f2 | tr -d ' \t')"
 [ -n "$EXT_SUFFIX" ] || { echo "错误：Makefile 里没找到 EXT_SUFFIX。" >&2; exit 1; }
+# deps 形态：BLDSHARED 覆盖会把 LDFLAGS 里的 -L 弄丢——_ssl/_hashlib/_ctypes 链接
+# 找不到 libssl/libffi 即被 CPython 软失败机制静默跳过（make 仍返回 0，第七轮实锤：
+# configure 探测全过而产物缺三扩展），必须显式补回 -L
+DEPS_SHARED_L=""
+if [ -n "$PY_DEPS_PREFIX" ]; then
+  DEPS_SHARED_L="-L$PY_DEPS_PREFIX/lib"
+fi
 # 重新链接 libpython 让 SONAME 与文件名一致（libpython3.13.so），扩展的 DT_NEEDED 才对得上。
 # 不用 patchelf：它曾在本类项目改出损坏的 .dynstr（加载时 soname 错位一字节）。
 rm -f "libpython$SOVER.so" "libpython$SOVER.so.1.0"
@@ -217,8 +224,15 @@ make "libpython$SOVER.so" "INSTSONAME=libpython$SOVER.so" "LDLIBRARY=libpython$S
   >> "$WORK/build.log" 2>&1
 rm -f Modules/*"$EXT_SUFFIX"
 make -j"$(nproc)" sharedmods \
-  "BLDSHARED=\$(CC) -shared \$(PY_CORE_LDFLAGS) -L$PWD -Wl,--no-as-needed -lpython$SOVER" \
+  "BLDSHARED=\$(CC) -shared \$(PY_CORE_LDFLAGS) $DEPS_SHARED_L -L$PWD -Wl,--no-as-needed -lpython$SOVER" \
   >> "$WORK/build.log" 2>&1
+
+# 软失败守卫：CPython 扩展构建失败只打 warning（make 返回 0）——显式抓出并失败
+if grep -E "^(Failed to build these modules|Could not build these modules):" "$WORK/build.log" | tail -5 | grep -q .; then
+  echo "错误：存在链接失败的扩展（软失败被拦）：" >&2
+  grep -E "^(Failed to build these modules|Could not build these modules):" "$WORK/build.log" | tail -5 >&2
+  exit 1
+fi
 
 echo "== make install (DESTDIR)"
 rm -rf "$WORK/dest"
