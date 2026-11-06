@@ -1,0 +1,209 @@
+# 门 2 包构建 workflow（2026-11-07）：24 件包（15 纯 py + 9 C/C++）交叉编译。
+# 前置：build-gate2 已产出 ohos-py-deps-prefix 与 cpython-ohos-3.13.18-aarch64-g2
+# 两个 artifact（本 workflow 从最近成功 run 拉取；过期重跑 build-gate2）。
+#
+# ── job 结构（两 job 接力，各自 85 分钟限内）──────────────────────────────────
+#   pkgs-core  ：rootfs(qemu 环境) + 纯 py 15 件 + setuptools 系 5 件
+#                （regex/cffi/kiwisolver/pillow/lxml）+ numpy（★止损线判据，红即整批停）
+#                → artifact pkg-tree-core（三层产物树 + 目标侧 site 树）
+#   pkgs-heavy ：rootfs 重建 + 融合 core 的目标侧 site → contourpy/pandas/matplotlib
+#                → bundle（双 zip 汇总 + sitecustomize）→ verify（qemu 按真机布局冒烟）
+#                → artifact pkg-final（site-packages.zip + extras.zip + libs.tar.gz）
+name: build-packages
+
+on:
+  workflow_dispatch:
+
+env:
+  SDK_URL: https://repo.huaweicloud.com/openharmony/os/7.0-Release/ohos-sdk-windows_linux-public_20260829.tar.gz
+  SDK_SHA256: 6bf6ae1efe8de0e8bd15ddbd7fac58bcb54d9620262a541b9b219439317a4c42
+  SDK_FILENAME: ohos-sdk-windows_linux-public_20260829.tar.gz
+
+jobs:
+  pkgs-core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 85
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup host python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install host build tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static ninja-build && python3 -m pip install --quiet meson
+
+      - name: Restore OHOS SDK cache
+        id: sdk
+        uses: actions/cache@v4
+        with:
+          path: ~/ohos-sdk-native
+          key: ohos-sdk-native-${{ env.SDK_FILENAME }}
+
+      - name: Download and extract OHOS SDK (linux native)
+        if: steps.sdk.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          cd "$RUNNER_TEMP"
+          curl -C - --retry 3 --retry-delay 10 -o "$SDK_FILENAME" "$SDK_URL"
+          echo "$SDK_SHA256  $SDK_FILENAME" | sha256sum -c -
+          tar -xzf "$SDK_FILENAME"
+          rm -f "$SDK_FILENAME"
+          cd ohos-sdk/linux
+          unzip -q native-linux-x64-*.zip
+          rm -f ./*.zip
+          mv native "$HOME/ohos-sdk-native"
+          cd "$RUNNER_TEMP" && rm -rf ohos-sdk
+
+      - name: Fetch latest gate2 artifacts
+        run: |
+          set -euxo pipefail
+          G2_RUN=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow build-gate2 --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          [ -n "$G2_RUN" ] || { echo "无成功的 build-gate2 run——先跑 build-gate2"; exit 1; }
+          gh run download "$G2_RUN" --repo "$GITHUB_REPOSITORY" \
+            --name ohos-py-deps-prefix --dir "$RUNNER_TEMP/deps"
+          gh run download "$G2_RUN" --repo "$GITHUB_REPOSITORY" \
+            --name cpython-ohos-3.13.18-aarch64-g2 --dir "$RUNNER_TEMP/g2"
+          mkdir -p "$HOME/ohos-py-deps" "$RUNNER_TEMP/g2x"
+          tar -xzf "$RUNNER_TEMP/deps/ohos-py-deps-prefix.tar.gz" -C "$HOME/ohos-py-deps"
+          tar -xzf "$RUNNER_TEMP/g2/cpython-ohos-3.13.18-aarch64-g2.tar.gz" -C "$RUNNER_TEMP/g2x"
+          ls "$RUNNER_TEMP/g2x"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Build packages (rootfs + pure + setuptools five + numpy)
+        run: |
+          set -euxo pipefail
+          export SDK_NATIVE="$HOME/ohos-sdk-native" \
+                 G2_DIR="$RUNNER_TEMP/g2x" \
+                 PY_DEPS_PREFIX="$HOME/ohos-py-deps/prefix" \
+                 OUT_DIR="$GITHUB_WORKSPACE/pkg-out" \
+                 WORK="$HOME/ohos-py-pkgs"
+          # 逐段跑（numpy 失败脚本自身硬退 3 = 止损线，job 随之中断）
+          for stage in rootfs pure regex cffi kiwisolver pillow lxml numpy; do
+            STAGE="$stage" bash factory/build-packages.sh
+          done
+
+      - name: Pack core artifacts
+        if: always()
+        run: |
+          set -euxo pipefail
+          mkdir -p "$RUNNER_TEMP/pack"
+          tar -czf "$RUNNER_TEMP/pack/pkg-tree-core.tar.gz" -C "$GITHUB_WORKSPACE" pkg-out
+          tar -czf "$RUNNER_TEMP/pack/tgt-site.tar.gz" -C "$HOME/ohos-py-pkgs/alpine-a64/py" site
+          ls -l "$RUNNER_TEMP/pack" | awk '{printf "%12d B  %s\n", $5, $9}'
+
+      - name: Upload core artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pkg-tree-core
+          path: |
+            ${{ runner.temp }}/pack/pkg-tree-core.tar.gz
+            ${{ runner.temp }}/pack/tgt-site.tar.gz
+          retention-days: 30
+          if-no-files-found: error
+
+  pkgs-heavy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 85
+    needs: pkgs-core
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup host python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install host build tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static ninja-build unzip && python3 -m pip install --quiet meson
+
+      - name: Restore OHOS SDK cache
+        id: sdk
+        uses: actions/cache@v4
+        with:
+          path: ~/ohos-sdk-native
+          key: ohos-sdk-native-${{ env.SDK_FILENAME }}
+
+      - name: Download and extract OHOS SDK (linux native)
+        if: steps.sdk.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          cd "$RUNNER_TEMP"
+          curl -C - --retry 3 --retry-delay 10 -o "$SDK_FILENAME" "$SDK_URL"
+          echo "$SDK_SHA256  $SDK_FILENAME" | sha256sum -c -
+          tar -xzf "$SDK_FILENAME"
+          rm -f "$SDK_FILENAME"
+          cd ohos-sdk/linux
+          unzip -q native-linux-x64-*.zip
+          rm -f ./*.zip
+          mv native "$HOME/ohos-sdk-native"
+          cd "$RUNNER_TEMP" && rm -rf ohos-sdk
+
+      - name: Fetch latest gate2 artifacts
+        run: |
+          set -euxo pipefail
+          G2_RUN=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow build-gate2 --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          [ -n "$G2_RUN" ] || { echo "无成功的 build-gate2 run——先跑 build-gate2"; exit 1; }
+          gh run download "$G2_RUN" --repo "$GITHUB_REPOSITORY" \
+            --name ohos-py-deps-prefix --dir "$RUNNER_TEMP/deps"
+          gh run download "$G2_RUN" --repo "$GITHUB_REPOSITORY" \
+            --name cpython-ohs-3.13.18-aarch64-g2 --dir "$RUNNER_TEMP/g2"
+          mkdir -p "$HOME/ohos-py-deps" "$RUNNER_TEMP/g2x"
+          tar -xzf "$RUNNER_TEMP/deps/ohos-py-deps-prefix.tar.gz" -C "$HOME/ohos-py-deps"
+          tar -xzf "$RUNNER_TEMP/g2/cpython-ohos-3.13.18-aarch64-g2.tar.gz" -C "$RUNNER_TEMP/g2x"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Restore core artifacts
+        run: |
+          set -euxo pipefail
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name pkg-tree-core --dir "$RUNNER_TEMP/core" || {
+            CORE_RUN=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow build-packages --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+            gh run download "$CORE_RUN" --repo "$GITHUB_REPOSITORY" --name pkg-tree-core --dir "$RUNNER_TEMP/core"
+          }
+          tar -xzf "$RUNNER_TEMP/core/pkg-tree-core.tar.gz" -C "$GITHUB_WORKSPACE"
+          mkdir -p "$HOME/ohos-py-pkgs/alpine-a64/py"
+          tar -xzf "$RUNNER_TEMP/core/tgt-site.tar.gz" -C "$HOME/ohos-py-pkgs/alpine-a64/py"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Build heavy packages (rootfs + contourpy + pandas + matplotlib + bundle + verify)
+        run: |
+          set -euxo pipefail
+          export SDK_NATIVE="$HOME/ohos-sdk-native" \
+                 G2_DIR="$RUNNER_TEMP/g2x" \
+                 PY_DEPS_PREFIX="$HOME/ohos-py-deps/prefix" \
+                 OUT_DIR="$GITHUB_WORKSPACE/pkg-out" \
+                 WORK="$HOME/ohos-py-pkgs"
+          # rootfs 幂等（TGT_SITE 已含 core 各包树，跳过重装构建依赖）
+          STAGE=rootfs bash factory/build-packages.sh
+          for stage in contourpy pandas matplotlib bundle verify; do
+            STAGE="$stage" bash factory/build-packages.sh
+          done
+
+      - name: Pack final artifacts
+        if: always()
+        run: |
+          set -euxo pipefail
+          mkdir -p "$RUNNER_TEMP/pack"
+          cp -f "$GITHUB_WORKSPACE/pkg-out/site-packages.zip" "$RUNNER_TEMP/pack/"
+          cp -f "$GITHUB_WORKSPACE/pkg-out/extras.zip" "$RUNNER_TEMP/pack/"
+          tar -czf "$RUNNER_TEMP/pack/pkg-libs.tar.gz" -C "$GITHUB_WORKSPACE/pkg-out" libs
+          ls -l "$RUNNER_TEMP/pack" | awk '{printf "%12d B  %s\n", $5, $9}'
+
+      - name: Upload final artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pkg-final
+          path: |
+            ${{ runner.temp }}/pack/site-packages.zip
+            ${{ runner.temp }}/pack/extras.zip
+            ${{ runner.temp }}/pack/pkg-libs.tar.gz
+          retention-days: 30
+          if-no-files-found: error
