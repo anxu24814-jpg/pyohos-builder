@@ -23,7 +23,17 @@
 #   SDK_NATIVE=<Linux SDK 的 native 目录> \
 #   BUILD_PYTHON=python3.13 \
 #   OUT_DIR=<产物输出目录> \
+#   PY_DEPS_PREFIX=<依赖基座 prefix，可选> \
 #   bash build-cpython-ohos.sh
+#
+# 门 2 演进（2026-11-07）：PY_DEPS_PREFIX 在场时启用扩展供给形态——
+#   · Setup.local 去掉 _ctypes 禁用（libffi 由 build-native-deps.sh 提供，解禁；
+#     cffi/pypdfium2 的 ctypes 形态依赖它）
+#   · configure 追加 --with-openssl=<prefix>（_ssl/_hashlib 由 OpenSSL 3.5 供给）
+#   · CPPFLAGS/LDFLAGS 指 prefix（zlib 等优先取基座版本）
+#   · 产物 tarball 增补 deps-libs/（libssl.so.3 libcrypto.so.3 libffi.so.8——设备上
+#     无系统侧实现，随应用 lib 目录分发）
+#   prefix 缺席时保持门 0 形态（_ctypes 禁、无 _ssl），兼容旧行。
 set -euo pipefail
 
 # ---- 冻结基线（门 0 契约，勿改：scripts/python-runtime/manifest.json 单源）----
@@ -36,6 +46,12 @@ SDK_NATIVE="${SDK_NATIVE:-}"
 BUILD_PYTHON="${BUILD_PYTHON:-python3.13}"
 OUT_DIR="${OUT_DIR:-$PWD/out}"
 WORK="${WORK:-$HOME/cpython-ohos-$PY_VERSION}"
+# 门 2 依赖基座 prefix（build-native-deps.sh 产物）；在场即启用扩展供给形态
+PY_DEPS_PREFIX="${PY_DEPS_PREFIX:-}"
+if [ -n "$PY_DEPS_PREFIX" ] && [ ! -d "$PY_DEPS_PREFIX" ]; then
+  echo "错误：PY_DEPS_PREFIX 目录不存在：$PY_DEPS_PREFIX（应先跑 build-native-deps.sh）。" >&2
+  exit 1
+fi
 
 # ---- 外部状态校验（P0-1：任一不满足即中文报错退出非零）----
 if [ -z "$SDK_NATIVE" ]; then
@@ -112,6 +128,15 @@ export STRIP="$LLVM_BIN/llvm-strip"
 export CFLAGS="-O2 -fPIC -Wno-error=implicit-function-declaration -Wno-error=int-conversion"
 export CXXFLAGS="-O2 -fPIC"
 export LDFLAGS="-fuse-ld=lld"
+EXTRA_CONFIGURE_ARGS=""
+if [ -n "$PY_DEPS_PREFIX" ]; then
+  # 门 2 形态：头/库指基座 prefix（zlib 等优先取基座版），_ssl/_hashlib 由 OpenSSL 供给
+  export CFLAGS="$CFLAGS -I$PY_DEPS_PREFIX/include"
+  export CXXFLAGS="$CXXFLAGS -I$PY_DEPS_PREFIX/include"
+  export LDFLAGS="$LDFLAGS -L$PY_DEPS_PREFIX/lib"
+  export PKG_CONFIG_PATH="$PY_DEPS_PREFIX/lib/pkgconfig"
+  EXTRA_CONFIGURE_ARGS="--with-openssl=$PY_DEPS_PREFIX --with-openssl-rpath=no"
+fi
 
 echo "== configure (host=aarch64-linux-gnu, CC=OHOS clang)"
 # 交叉编译时 configure 不能探测设备文件/运行时行为，这些答案按 Linux 默认值给死
@@ -127,7 +152,27 @@ export ac_cv_little_endian_double=yes
 #   或某模块仍被拉入，按报错在本清单内增删后重跑（登记变更记录），不得改两遍 make 机制。
 # 必须在 configure 之前写 —— Modules/Setup 是 configure 阶段用 Setup.stdlib + Setup.local
 # 合成的；之后写只会在部分构建顺序下碰巧生效，重编会把禁用模块又拉回来。
-cat > Modules/Setup.local <<'EOF'
+# 门 2 形态（deps 在场）解禁 _ctypes（libffi 已供给）；门 0 形态保持禁用。
+if [ -n "$PY_DEPS_PREFIX" ]; then
+  cat > Modules/Setup.local <<'EOF'
+*disabled*
+_locale
+_curses
+_curses_panel
+readline
+_tkinter
+_dbm
+_gdbm
+_ndbm
+_uuid
+nis
+ossaudiodev
+spwd
+_crypt
+_multiprocessing
+EOF
+else
+  cat > Modules/Setup.local <<'EOF'
 *disabled*
 _locale
 _ctypes
@@ -145,12 +190,14 @@ spwd
 _crypt
 _multiprocessing
 EOF
+fi
 
 # 不传 --with-openssl：sysroot 里没有 OpenSSL 头，configure 会自动跳过 _ssl/_hashlib
-# （门 2 配 build-native-deps 后再补回）。
+# （门 2 形态经 EXTRA_CONFIGURE_ARGS 供给基座 OpenSSL）。
 ./configure --build=x86_64-linux-gnu --host=aarch64-linux-gnu \
   --enable-shared --without-ensurepip --disable-ipv6 --disable-test-modules \
   --with-build-python="$BUILD_PYTHON" --with-computed-gotos \
+  $EXTRA_CONFIGURE_ARGS \
   > "$WORK/configure.log" 2>&1
 
 echo "== make -j$(nproc)（第一遍：正常构建）"
@@ -229,6 +276,43 @@ ZL="$WORK/zlib-$ZLIB_VERSION"
 # 5) build-log.txt（configure/build/install 三段日志合一，供排障与构建取证）
 cat "$WORK/configure.log" "$WORK/build.log" "$WORK/install.log" > "$OUT_DIR/build-log.txt"
 
+# 6) 门 2 形态：依赖基座库随产物（设备无系统侧实现，_ssl/_ctypes 的 DT_NEEDED 靠它们）
+if [ -n "$PY_DEPS_PREFIX" ]; then
+  rm -rf "$OUT_DIR/deps-libs"
+  mkdir -p "$OUT_DIR/deps-libs"
+  for lib in libssl.so.3 libcrypto.so.3 libffi.so.8; do
+    if [ ! -s "$PY_DEPS_PREFIX/lib/$lib" ]; then
+      echo "错误：基座库缺失：$PY_DEPS_PREFIX/lib/$lib（先跑 build-native-deps.sh）。" >&2
+      exit 1
+    fi
+    cp -f "$PY_DEPS_PREFIX/lib/$lib" "$OUT_DIR/deps-libs/"
+    "$STRIP" --strip-unneeded "$OUT_DIR/deps-libs/$lib" 2>/dev/null || true
+  done
+  # 门 2 自检：_ssl/_hashlib/_ctypes 必须在场（解禁失败的静默跳过在此拦截）
+  for mod in _ssl _hashlib _ctypes; do
+    if ! ls "$OUT_DIR/modules/$mod."*"$EXT_SUFFIX" >/dev/null 2>&1; then
+      echo "错误：扩展 $mod 未编出（deps 形态下应已解禁）——查 $WORK/configure.log 里对应探测段。" >&2
+      exit 1
+    fi
+  done
+
+  # 7) host-bundle：目标 python 可执行 + include 树（包构建 job 的 qemu 环境要
+  #    「能在构建机上运行的目标解释器」跑 setup.py/meson 内省，C 编译要 Python.h/pyconfig.h）
+  rm -rf "$OUT_DIR/host-bundle"
+  mkdir -p "$OUT_DIR/host-bundle/bin" "$OUT_DIR/host-bundle/lib" "$OUT_DIR/host-bundle/include"
+  if [ ! -x "$DEST/bin/python3.13" ]; then
+    echo "错误：安装树里没有 bin/python3.13（host-bundle 无法组装）。" >&2
+    exit 1
+  fi
+  cp -f "$DEST/bin/python3.13" "$OUT_DIR/host-bundle/bin/"
+  cp -f "$PWD/libpython$SOVER.so" "$OUT_DIR/host-bundle/lib/libpython$SOVER.so"
+  cp -r "$DEST/include/python$SOVER" "$OUT_DIR/host-bundle/include/python$SOVER"
+  # 目标侧 python3.13 符号链接形态（部分工具按 python3 调用）一并带上
+  if [ -e "$DEST/bin/python3" ] && [ ! -e "$OUT_DIR/host-bundle/bin/python3" ]; then
+    ln -s python3.13 "$OUT_DIR/host-bundle/bin/python3"
+  fi
+fi
+
 # ---- 产物自校验（五件在场 + 非零字节）----
 for f in "libpython$SOVER.so" "python${SOVER/./}.zip" "libz.so" "build-log.txt"; do
   if [ ! -s "$OUT_DIR/$f" ]; then
@@ -238,12 +322,22 @@ for f in "libpython$SOVER.so" "python${SOVER/./}.zip" "libz.so" "build-log.txt";
 done
 
 # ---- 打成单一 tarball（Actions 单文件上传最快，U3 落位时解开）----
-TARBALL="$OUT_DIR/cpython-ohos-$PY_VERSION-aarch64.tar.gz"
+# 门 2 形态 tarball 名带 -g2 尾缀（与门 0 artifact 区分，防拉错产物）
+TAR_SUFFIX="aarch64"
+TAR_EXTRA=()
+if [ -n "$PY_DEPS_PREFIX" ]; then
+  TAR_SUFFIX="aarch64-g2"
+  TAR_EXTRA=("deps-libs" "host-bundle")
+fi
+TARBALL="$OUT_DIR/cpython-ohos-$PY_VERSION-$TAR_SUFFIX.tar.gz"
 ( cd "$OUT_DIR" && tar -czf "$TARBALL" \
-    "libpython$SOVER.so" "python${SOVER/./}.zip" "libz.so" "build-log.txt" modules )
+    "libpython$SOVER.so" "python${SOVER/./}.zip" "libz.so" "build-log.txt" modules "${TAR_EXTRA[@]}" )
 [ -s "$TARBALL" ] || { echo "错误：产物 tarball 生成失败：$TARBALL。" >&2; exit 1; }
 
 echo "== 完成，产物五件 + tarball："
 ls -l "$OUT_DIR/libpython$SOVER.so" "$OUT_DIR/python${SOVER/./}.zip" \
        "$OUT_DIR/libz.so" "$OUT_DIR/build-log.txt" "$TARBALL" | awk '{printf "%12d B  %s\n", $5, $9}'
+if [ -n "$PY_DEPS_PREFIX" ]; then
+  ls -l "$OUT_DIR/deps-libs"/* | awk '{printf "%12d B  %s\n", $5, $9}'
+fi
 echo "扩展模块：$EXT_COUNT 个（$OUT_DIR/modules/）"
