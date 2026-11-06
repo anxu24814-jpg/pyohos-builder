@@ -1,0 +1,249 @@
+#!/usr/bin/env bash
+# 交叉编译 CPython 3.13.18 为 HarmonyOS (OHOS) aarch64 动态库 + 标准库 zip。
+#
+# Attribution: 本脚本机制与结构取自 zhubowen-bot/Guncat-Work-for-hmos 仓库
+#   tooling/python/build-cpython-ohos.sh（Apache-2.0），取用日期 2026-11-06，
+#   按本项目门 0 冻结基线（CPython 3.13.18 / 禁模块清单 / 产物五件）改造。
+#   原脚本覆盖 3.12；3.13 的 Modules/Setup.stdlib 相对 3.12 有重构，
+#   禁模块清单以 3.13 实际报错微调的余地见下方 Setup.local 段注释。
+#
+# 机制要点（Guncat 真机实证，详见 docs/调研-鸿蒙Python运行时构建路线-20261106.md §3）:
+#   1) configure 拿 `$CC --print-multiarch` 与推导三元组比对，OHOS clang 应答
+#      aarch64-linux-ohos 会导致 "internal configure error" —— 用 cc/cxx 包装器把
+#      --print-multiarch 应答伪造成 aarch64-linux-gnu，实际编译目标仍是 OHOS。
+#   2) 设备上 C 扩展经 dlopen 加载，必须自带 DT_NEEDED libpython3.13.so
+#      （否则 PyModuleDef_Init: symbol not found）—— 第二遍 make 用
+#      -Wl,--no-as-needed -lpython3.13 重链全部 C 扩展；同时把 libpython 的
+#      SONAME 规范成单文件 libpython3.13.so（包里只需一个文件）。
+#   3) stdlib zip 必须 zip -qr0 存储模式（zipimport 解压依赖 zlib 扩展存在
+#      鸡生蛋问题；存储模式可直接 mmap；HAP 自身是 zip 会再压一次，体积几乎不涨）。
+#   4) 禁用 patchelf（Guncat 实锤曾改坏 .dynstr，soname 名字错位一字节）。
+#
+# 用法（GitHub Actions ubuntu / 任意 Linux 宿主）:
+#   SDK_NATIVE=<Linux SDK 的 native 目录> \
+#   BUILD_PYTHON=python3.13 \
+#   OUT_DIR=<产物输出目录> \
+#   bash build-cpython-ohos.sh
+set -euo pipefail
+
+# ---- 冻结基线（门 0 契约，勿改：scripts/python-runtime/manifest.json 单源）----
+PY_VERSION="3.13.18"          # v3.13 系最高 tag，冻结依据任务书 §0
+ZLIB_VERSION="1.3.1"          # Guncat 同版（zlib/binascii 两个扩展 NEEDED libz.so）
+SOVER="3.13"                  # libpython3.13.so / python313.zip 命名尾缀
+
+# ---- 环境变量 ----
+SDK_NATIVE="${SDK_NATIVE:-}"
+BUILD_PYTHON="${BUILD_PYTHON:-python3.13}"
+OUT_DIR="${OUT_DIR:-$PWD/out}"
+WORK="${WORK:-$HOME/cpython-ohos-$PY_VERSION}"
+
+# ---- 外部状态校验（P0-1：任一不满足即中文报错退出非零）----
+if [ -z "$SDK_NATIVE" ]; then
+  echo "错误：未设置 SDK_NATIVE 环境变量（应指向 Linux 版 OHOS SDK 的 native 目录，内含 llvm/ 与 sysroot/）。" >&2
+  exit 1
+fi
+if [ ! -d "$SDK_NATIVE" ]; then
+  echo "错误：SDK_NATIVE 目录不存在：$SDK_NATIVE。请先解压 Linux SDK 并传入其 native 子目录。" >&2
+  exit 1
+fi
+SYSROOT="$SDK_NATIVE/sysroot"
+CLANG="$SDK_NATIVE/llvm/bin/clang"
+CLANGXX="$SDK_NATIVE/llvm/bin/clang++"
+LLVM_BIN="$SDK_NATIVE/llvm/bin"
+for f in "$CLANG" "$CLANGXX" "$LLVM_BIN/llvm-ar" "$LLVM_BIN/llvm-strip" "$SYSROOT"; do
+  if [ ! -e "$f" ]; then
+    echo "错误：SDK_NATIVE 布局不完整，缺少：$f。预期 native 目录内含 llvm/bin/ 与 sysroot/。" >&2
+    exit 1
+  fi
+done
+if ! command -v "$BUILD_PYTHON" >/dev/null 2>&1; then
+  echo "错误：找不到宿主构建 python：$BUILD_PYTHON。交叉编译要求同 major.minor 版本（3.13.x）作 --with-build-python。" >&2
+  exit 1
+fi
+BUILD_PY_VER="$("$BUILD_PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+if [ "$BUILD_PY_VER" != "3.13" ]; then
+  echo "错误：BUILD_PYTHON 是 $BUILD_PY_VER，CPython configure 要求 build python 与目标 major.minor 全等（3.13.x），否则直接拒绝。" >&2
+  exit 1
+fi
+for tool in curl tar make zip; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "错误：宿主缺少命令：$tool。" >&2
+    exit 1
+  fi
+done
+
+mkdir -p "$WORK/toolchain" "$OUT_DIR"
+
+# ---- 编译器包装器（只为对齐 --print-multiarch；等价于官方 wrapper 形态：
+#      --target=aarch64-linux-ohos --sysroot=... -D__MUSL__，见 OHOS SDK
+#      llvm/bin/aarch64-unknown-linux-ohos-clang 的内联参数）----
+for kind in cc cxx; do
+  real="$CLANG"; [ "$kind" = "cxx" ] && real="$CLANGXX"
+  cat > "$WORK/toolchain/ohos-$kind" <<EOF
+#!/bin/sh
+case "\$1" in
+  --print-multiarch) echo aarch64-linux-gnu; exit 0 ;;
+esac
+exec "$real" --target=aarch64-linux-ohos --sysroot="$SYSROOT" -D__MUSL__ "\$@"
+EOF
+  chmod +x "$WORK/toolchain/ohos-$kind"
+done
+
+# ---- 取 CPython 源码 ----
+cd "$WORK"
+if [ ! -d "Python-$PY_VERSION" ]; then
+  if [ ! -s "Python-$PY_VERSION.tgz" ]; then
+    echo "== 下载 Python $PY_VERSION 源码包"
+    curl -fL --retry 3 -m 900 -o "Python-$PY_VERSION.tgz" \
+      "https://www.python.org/ftp/python/$PY_VERSION/Python-$PY_VERSION.tgz"
+  fi
+  tar xzf "Python-$PY_VERSION.tgz"
+fi
+
+cd "Python-$PY_VERSION"
+[ -f Makefile ] && make distclean >/dev/null 2>&1 || true
+
+export CC="$WORK/toolchain/ohos-cc"
+export CXX="$WORK/toolchain/ohos-cxx"
+export AR="$LLVM_BIN/llvm-ar"
+export RANLIB="$LLVM_BIN/llvm-ranlib"
+export STRIP="$LLVM_BIN/llvm-strip"
+# --sysroot/--target/-D__MUSL__ 已由包装器统一注入，这里只放通用旗标
+export CFLAGS="-O2 -fPIC -Wno-error=implicit-function-declaration -Wno-error=int-conversion"
+export CXXFLAGS="-O2 -fPIC"
+export LDFLAGS="-fuse-ld=lld"
+
+echo "== configure (host=aarch64-linux-gnu, CC=OHOS clang)"
+# 交叉编译时 configure 不能探测设备文件/运行时行为，这些答案按 Linux 默认值给死
+export ac_cv_file__dev_ptmx=no
+export ac_cv_file__dev_ptc=no
+export ac_cv_buggy_getaddrinfo=no
+export ac_cv_little_endian_double=yes
+
+# 禁模块清单 = manifest.json gate1DisabledModules（门 0 冻结，Guncat L77-103 同源）。
+# _locale 必禁（musl 无 libintl，Guncat 实录 _localemodule 找 textdomain 构建失败）；
+# _ctypes 因无 libffi 禁用（门 2 自编 libffi 后解禁）。
+# ★ 3.13 的 Modules/Setup.stdlib 相对 3.12 有重构：若 3.13 实际构建报「模块名不识别」
+#   或某模块仍被拉入，按报错在本清单内增删后重跑（登记变更记录），不得改两遍 make 机制。
+# 必须在 configure 之前写 —— Modules/Setup 是 configure 阶段用 Setup.stdlib + Setup.local
+# 合成的；之后写只会在部分构建顺序下碰巧生效，重编会把禁用模块又拉回来。
+cat > Modules/Setup.local <<'EOF'
+*disabled*
+_locale
+_ctypes
+_curses
+_curses_panel
+readline
+_tkinter
+_dbm
+_gdbm
+_ndbm
+_uuid
+nis
+ossaudiodev
+spwd
+_crypt
+_multiprocessing
+EOF
+
+# 不传 --with-openssl：sysroot 里没有 OpenSSL 头，configure 会自动跳过 _ssl/_hashlib
+# （门 2 配 build-native-deps 后再补回）。
+./configure --build=x86_64-linux-gnu --host=aarch64-linux-gnu \
+  --enable-shared --without-ensurepip --disable-ipv6 --disable-test-modules \
+  --with-build-python="$BUILD_PYTHON" --with-computed-gotos \
+  > "$WORK/configure.log" 2>&1
+
+echo "== make -j$(nproc)（第一遍：正常构建）"
+make -j"$(nproc)" > "$WORK/build.log" 2>&1
+
+# ---- 第二遍：规范 libpython SONAME + 给全部 C 扩展加 DT_NEEDED libpython ----
+echo "== 重链 libpython（SONAME=libpython$SOVER.so）与全部扩展"
+# EXT_SUFFIX 必须取目标构建的值（cpython-313-aarch64-linux-gnu.so），
+# 不能用宿主 python 的 sysconfig（x86_64），否则 rm 不到任何模块、等于没重链。
+EXT_SUFFIX="$(grep -m1 '^EXT_SUFFIX=' Makefile | cut -d= -f2 | tr -d ' \t')"
+[ -n "$EXT_SUFFIX" ] || { echo "错误：Makefile 里没找到 EXT_SUFFIX。" >&2; exit 1; }
+# 重新链接 libpython 让 SONAME 与文件名一致（libpython3.13.so），扩展的 DT_NEEDED 才对得上。
+# 不用 patchelf：它曾在本类项目改出损坏的 .dynstr（加载时 soname 错位一字节）。
+rm -f "libpython$SOVER.so" "libpython$SOVER.so.1.0"
+make "libpython$SOVER.so" "INSTSONAME=libpython$SOVER.so" "LDLIBRARY=libpython$SOVER.so" \
+  "BLDSHARED=\$(CC) -shared \$(PY_CORE_LDFLAGS) -Wl,-soname,libpython$SOVER.so" \
+  >> "$WORK/build.log" 2>&1
+rm -f Modules/*"$EXT_SUFFIX"
+make -j"$(nproc)" sharedmods \
+  "BLDSHARED=\$(CC) -shared \$(PY_CORE_LDFLAGS) -L$PWD -Wl,--no-as-needed -lpython$SOVER" \
+  >> "$WORK/build.log" 2>&1
+
+echo "== make install (DESTDIR)"
+rm -rf "$WORK/dest"
+make install DESTDIR="$WORK/dest" > "$WORK/install.log" 2>&1
+
+DEST="$WORK/dest"
+STDLIB="$(find "$DEST" -type d -name "python$SOVER" -path '*/lib/*' | head -1)"
+[ -n "$STDLIB" ] || { echo "错误：安装树里没找到标准库目录 python$SOVER。" >&2; exit 1; }
+# libpython 直接取构建目录里重链后的单文件（SONAME=文件名，是设备 dlopen 的正主）；
+# 安装树里的 .so.1.0 形态文件名与 SONAME 不一致，不采用。
+[ -f "$PWD/libpython$SOVER.so" ] || { echo "错误：构建目录里没找到重链后的 libpython$SOVER.so。" >&2; exit 1; }
+
+echo "== 打包（产物五件 → $OUT_DIR）"
+
+# 1) libpython3.13.so（strip）
+cp -f "$PWD/libpython$SOVER.so" "$OUT_DIR/libpython$SOVER.so"
+"$STRIP" --strip-unneeded "$OUT_DIR/libpython$SOVER.so" 2>/dev/null || true
+
+# 2) 标准库 zip（存储模式 -0；排除清单照调研档 §3.3 第 6 步）
+rm -f "$OUT_DIR/python${SOVER/./}.zip"
+( cd "$STDLIB" && zip -qr0 "$OUT_DIR/python${SOVER/./}.zip" . \
+    -x 'test/*' -x 'idlelib/*' -x 'turtledemo/*' -x 'tkinter/*' -x 'lib2to3/*' \
+    -x 'ensurepip/*' -x 'lib-dynload/*' -x '__pycache__/*' -x '*.pyc' -x 'config-*/*' )
+
+# 3) C 扩展模块（全部带 DT_NEEDED libpython；只有应用 lib 目录 .so 可被设备 dlopen）
+rm -rf "$OUT_DIR/modules"
+mkdir -p "$OUT_DIR/modules"
+cp -f "$STDLIB"/lib-dynload/*"$EXT_SUFFIX" "$OUT_DIR/modules/" 2>/dev/null \
+  || { echo "错误：lib-dynload 里没有任何 *$EXT_SUFFIX 扩展，重链步骤可能未生效。" >&2; exit 1; }
+EXT_COUNT=0
+for f in "$OUT_DIR/modules"/*"$EXT_SUFFIX"; do
+  [ -f "$f" ] && { "$STRIP" --strip-unneeded "$f" 2>/dev/null || true; EXT_COUNT=$((EXT_COUNT+1)); } || true
+done
+# Guncat 3.12 基线为 56 个扩展；禁 15 模块后 3.13 应仍有 40+，低于 10 视为半成品
+if [ "$EXT_COUNT" -lt 10 ]; then
+  echo "错误：C 扩展仅 $EXT_COUNT 个（预期 40+，下限 10），构建不完整。" >&2
+  exit 1
+fi
+
+# 4) 自编 libz.so（zlib/binascii 扩展 NEEDED libz.so，OHOS 无系统侧可用实现，随包自带）
+if [ ! -d "$WORK/zlib-$ZLIB_VERSION" ]; then
+  [ -s "$WORK/zlib-$ZLIB_VERSION.tar.gz" ] || curl -fL --retry 3 -m 600 \
+    -o "$WORK/zlib-$ZLIB_VERSION.tar.gz" \
+    "https://codeload.github.com/madler/zlib/tar.gz/refs/tags/v$ZLIB_VERSION"
+  tar xzf "$WORK/zlib-$ZLIB_VERSION.tar.gz" -C "$WORK"
+fi
+ZL="$WORK/zlib-$ZLIB_VERSION"
+"$CC" -O2 -fPIC -shared -Wl,-soname,libz.so -o "$OUT_DIR/libz.so" \
+  "$ZL/adler32.c" "$ZL/compress.c" "$ZL/crc32.c" "$ZL/deflate.c" "$ZL/gzclose.c" \
+  "$ZL/gzlib.c" "$ZL/gzread.c" "$ZL/gzwrite.c" "$ZL/inflate.c" "$ZL/infback.c" \
+  "$ZL/inftrees.c" "$ZL/inffast.c" "$ZL/trees.c" "$ZL/uncompr.c" "$ZL/zutil.c" \
+  >> "$WORK/build.log" 2>&1
+"$STRIP" --strip-unneeded "$OUT_DIR/libz.so" 2>/dev/null || true
+
+# 5) build-log.txt（configure/build/install 三段日志合一，供排障与构建取证）
+cat "$WORK/configure.log" "$WORK/build.log" "$WORK/install.log" > "$OUT_DIR/build-log.txt"
+
+# ---- 产物自校验（五件在场 + 非零字节）----
+for f in "libpython$SOVER.so" "python${SOVER/./}.zip" "libz.so" "build-log.txt"; do
+  if [ ! -s "$OUT_DIR/$f" ]; then
+    echo "错误：产物缺失或为空：$OUT_DIR/$f。" >&2
+    exit 1
+  fi
+done
+
+# ---- 打成单一 tarball（Actions 单文件上传最快，U3 落位时解开）----
+TARBALL="$OUT_DIR/cpython-ohos-$PY_VERSION-aarch64.tar.gz"
+( cd "$OUT_DIR" && tar -czf "$TARBALL" \
+    "libpython$SOVER.so" "python${SOVER/./}.zip" "libz.so" "build-log.txt" modules )
+[ -s "$TARBALL" ] || { echo "错误：产物 tarball 生成失败：$TARBALL。" >&2; exit 1; }
+
+echo "== 完成，产物五件 + tarball："
+ls -l "$OUT_DIR/libpython$SOVER.so" "$OUT_DIR/python${SOVER/./}.zip" \
+       "$OUT_DIR/libz.so" "$OUT_DIR/build-log.txt" "$TARBALL" | awk '{printf "%12d B  %s\n", $5, $9}'
+echo "扩展模块：$EXT_COUNT 个（$OUT_DIR/modules/）"
