@@ -305,7 +305,17 @@ if [ -n "$PY_DEPS_PREFIX" ]; then
   # 门 2 自检：_ssl/_hashlib/_ctypes 必须在场（解禁失败的静默跳过在此拦截）
   for mod in _ssl _hashlib _ctypes; do
     if ! ls "$OUT_DIR/modules/$mod."*"$EXT_SUFFIX" >/dev/null 2>&1; then
-      echo "错误：扩展 $mod 未编出（deps 形态下应已解禁）——查 $WORK/configure.log 里对应探测段。" >&2
+      echo "错误：扩展 $mod 未编出（deps 形态下应已解禁）。诊断证据：" >&2
+      echo "== Modules/ 实际编出的扩展（$EXT_SUFFIX）==" >&2
+      ( cd "$WORK/Python-$PY_VERSION" 2>/dev/null && ls Modules/*"$EXT_SUFFIX" 2>/dev/null | wc -l \
+        && ls Modules/*"$EXT_SUFFIX" 2>/dev/null | head -10 ) >&2 || true
+      echo "== Makefile 模块态 ==" >&2
+      grep -E '^(MODULE__SSL_STATE|MODULE__HASHLIB_STATE|MODULE__CTYPES_STATE|MODULE__SSL__DEPS)' \
+        "$WORK/Python-$PY_VERSION/Makefile" >&2 || true
+      echo "== build.log 里 ssl/ffi/ctypes/WARNING/renaming 相关行 ==" >&2
+      grep -n -i -E "ssl|ffi|ctypes|warning|renaming|failed" "$WORK/build.log" | tail -40 >&2 || true
+      echo "== build.log 尾部 40 行 ==" >&2
+      tail -40 "$WORK/build.log" >&2 || true
       exit 1
     fi
   done
