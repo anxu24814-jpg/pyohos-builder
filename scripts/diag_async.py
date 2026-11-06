@@ -104,7 +104,7 @@ def submit_async_exc(box):
     rc = SetAsyncExc(box['ptr'], KeyboardInterrupt)
     print(f'[B-sniper] rc={rc}', flush=True)
 
-run_case('A-pending-call', submit_pending, None)
+# run_case('A-pending-call', submit_pending, None)  # 3.13 已证：不生效且 SIGSEGV，跳过防拖垮 B
 time.sleep(0.5)
 run_case('B-set-async-exc', submit_async_exc, None)
 print('DIAG-DONE', flush=True)
