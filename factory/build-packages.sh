@@ -438,11 +438,14 @@ if want contourpy; then
   build_meson_pkg contourpy "$V_contourpy" || true
 fi
 if want pandas; then
-  # pandas 的 Cython cimport numpy 找不到 .pxd —— 把 TGT_SITE 里 numpy 的 .pxd 树
-  # 复制到 pandas 源码根（Guncat 同法）
+  # pandas 的 Cython cimport numpy 找不到 .pxd —— 把 TGT_SITE 里 numpy 的 .pxd 按树形
+  # 复制到 pandas 源码根（Guncat 同法：只拷 *.pxd，整树拷会污染源码根）
   dir="$(fetch_sdist pandas "$V_pandas")"
   if [ -d "$TGT_SITE/numpy" ] && [ ! -e "$dir/numpy" ]; then
-    cp -r "$TGT_SITE/numpy" "$dir/numpy"
+    ( cd "$TGT_SITE/numpy" && find . -name '*.pxd' | while read -r f; do
+        mkdir -p "$dir/numpy/$(dirname "$f")"
+        cp -f "$TGT_SITE/numpy/$f" "$dir/numpy/$f"
+      done )
   fi
   build_meson_pkg pandas "$V_pandas" || true
 fi
@@ -470,6 +473,11 @@ if want bundle; then
   cp -fn "$G2_DIR/modules/"*.so "$OUT_DIR/libs/" 2>/dev/null || true
   cp -fn "$G2_DIR/libz.so" "$OUT_DIR/libs/" 2>/dev/null || true
   for lib in "$G2_DIR"/deps-libs/*.so*; do cp -fn "$lib" "$OUT_DIR/libs/" 2>/dev/null || true; done
+  # 基座运行库（pillow/lxml/matplotlib/OpenBLAS 的 DT_NEEDED 对象）随包平铺
+  for lib in libpng16.so.16 libjpeg.so.62 libxml2.so.2 libxslt.so.1 libexslt.so.0 \
+             libfreetype.so.6 libqhull_r.so.8.0 libopenblas.so; do
+    [ -s "$PY_DEPS_PREFIX/lib/$lib" ] && cp -fn "$PY_DEPS_PREFIX/lib/$lib" "$OUT_DIR/libs/" || true
+  done
   # numpy.fft 的 pocketfft 是 C++（Guncat：libc++_shared.so 随包）
   if [ -f "$SDK_NATIVE/llvm/lib/aarch64-linux-ohos/libc++_shared.so" ]; then
     cp -fn "$SDK_NATIVE/llvm/lib/aarch64-linux-ohos/libc++_shared.so" "$OUT_DIR/libs/"
