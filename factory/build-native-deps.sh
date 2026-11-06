@@ -38,6 +38,9 @@ LIBJPEG_VERSION="3.0.4"
 LIBXML2_VERSION="2.13.5"
 LIBXSLT_VERSION="1.1.42"
 QHULL_VERSION="8.0.2"
+# OpenBLAS（BLAS 供给）：NOFORTRAN=1 纯 C 形态（LAPACK 走 numpy 内置 lapack-lite 兜底，
+# 免 Guncat 的 gfortran 交叉 + libgfortran 替身链）；真机 BLAS 性能读数留闸②③ 实测
+OPENBLAS_VERSION="0.3.28"
 
 # ---- 环境变量 ----
 SDK_NATIVE="${SDK_NATIVE:-}"
@@ -73,6 +76,17 @@ for tool in curl tar make cmake autoreconf pkg-config; do
 done
 
 mkdir -p "$WORK" "$PREFIX/include" "$PREFIX/lib" "$LOGS"
+
+# ERR trap：任一步失败即打印最新日志尾 30 行（日志都在 $LOGS，免逐轮拉 run 日志猜）
+on_err() {
+  local latest
+  latest=$(ls -t "$LOGS" 2>/dev/null | head -1)
+  if [ -n "$latest" ]; then
+    echo "==== 构建失败，$latest 尾部 30 行 ====" >&2
+    tail -30 "$LOGS/$latest" >&2 || true
+  fi
+}
+trap on_err ERR
 export CC="$CLANG"
 export CXX="$CLANGXX"
 export AR="$LLVM_BIN/llvm-ar"
@@ -131,7 +145,9 @@ if [ ! -f "$PREFIX/lib/libffi.so.8" ]; then
   fetch "https://codeload.github.com/libffi/libffi/tar.gz/refs/tags/v$LIBFFI_VERSION" \
     "libffi-$LIBFFI_VERSION.tar.gz"
   [ -d "libffi-$LIBFFI_VERSION" ] || tar xzf "libffi-$LIBFFI_VERSION.tar.gz"
-  ( cd "libffi-$LIBFFI_VERSION" && { [ -x ./configure ] || autoreconf -fi > "$LOGS/libffi-autogen.log" 2>&1; } \
+  ( cd "libffi-$LIBFFI_VERSION" \
+    && { [ -x ./configure ] || ./autogen.sh > "$LOGS/libffi-autogen.log" 2>&1 \
+         || autoreconf -fi > "$LOGS/libffi-autogen.log" 2>&1; } \
     && ./configure --host=aarch64-linux-gnu --build=x86_64-linux-gnu \
       --prefix="$PREFIX" --disable-static --enable-shared \
       CFLAGS="$XFLAGS" LDFLAGS="$XLDFLAGS" \
@@ -222,6 +238,52 @@ if [ ! -f "$PREFIX/lib/libxslt.so.1" ]; then
     && make install > "$LOGS/libxslt-install.log" 2>&1 )
 fi
 
+# ---------------- OpenBLAS（numpy BLAS 供给；seccomp 补丁必打——Guncat 2.10 真机实锤）----------------
+# HarmonyOS seccomp 把 mbind/set_mempolicy 判违规直接 SIGSYS 杀进程（import numpy → dlopen
+# libopenblas → .init → blas_memory_alloc 调 my_mbind 即死，try/except 无效）。补丁 = 给
+# common_linux.h 两函数的官方 __LSB_VERSION__ 短路分支并入自家宏 PYOHOS_NO_NUMA_SYSCALLS，
+# 编译期 -D 激活（手机无 NUMA 策略可谈，跳过无副作用）；同时 NO_AFFINITY=1 防
+# sched_setaffinity 同类拦截。
+if [ ! -f "$PREFIX/lib/libopenblas.so" ]; then
+  log "OpenBLAS $OPENBLAS_VERSION（NOFORTRAN=1 + seccomp 补丁）"
+  cd "$WORK"
+  fetch "https://codeload.github.com/OpenMathLib/OpenBLAS/tar.gz/refs/tags/v$OPENBLAS_VERSION" \
+    "openblas-$OPENBLAS_VERSION.tar.gz"
+  [ -d "OpenBLAS-$OPENBLAS_VERSION" ] || tar xzf "openblas-$OPENBLAS_VERSION.tar.gz"
+  mkdir -p "$PREFIX/lib/pkgconfig" "$PREFIX/include"
+  (
+    set -e
+    cd "OpenBLAS-$OPENBLAS_VERSION"
+    # seccomp 补丁：官方 __LSB_VERSION__ 短路分支并入自家宏（两函数一次 sed 全替换）
+    sed -i 's/#if defined (__LSB_VERSION__) || defined(ARCH_ZARCH)/#if defined (__LSB_VERSION__) || defined(ARCH_ZARCH) || defined(PYOHOS_NO_NUMA_SYSCALLS)/' common_linux.h
+    [ "$(grep -c 'PYOHOS_NO_NUMA_SYSCALLS' common_linux.h)" -ge 2 ] || {
+      echo "错误：OpenBLAS seccomp 补丁未命中（common_linux.h 结构可能变了）。" >&2; exit 1; }
+    make -j"$(nproc)" TARGET=ARMV8 BINARY=64 NOFORTRAN=1 NO_LAPACK=1 NO_SHARED=1 \
+      NO_AFFINITY=1 BUILD_WITHOUT_LAPACKE=1 \
+      CC="$CC" AR="$AR" RANLIB="$RANLIB" HOSTCC=gcc \
+      CFLAGS="--sysroot=$SYSROOT -O2 -fPIC -DPYOHOS_NO_NUMA_SYSCALLS" \
+      > "$LOGS/openblas-build.log" 2>&1
+    "$CC" -shared -fuse-ld=lld -o libopenblas.so \
+      -Wl,--whole-archive libopenblas_armv8p-r"$OPENBLAS_VERSION".a -Wl,--no-whole-archive \
+      -lm -Wl,-soname,libopenblas.so
+    cp -f libopenblas.so "$PREFIX/lib/"
+    cp -f cblas.h "$PREFIX/include/" 2>/dev/null || true
+  )
+  cat > "$PREFIX/lib/pkgconfig/openblas.pc" <<EOF
+prefix=$PREFIX
+libdir=\${prefix}/lib
+includedir=\${prefix}/include
+
+Name: openblas
+Description: OpenBLAS NOFORTRAN (cross-built for OpenHarmony, no LAPACK)
+Version: $OPENBLAS_VERSION
+Libs: -L\${libdir} -lopenblas
+Cflags: -I\${includedir}
+EOF
+  cp -f "$PREFIX/lib/pkgconfig/openblas.pc" "$PREFIX/lib/pkgconfig/blas.pc"
+  "$STRIP" --strip-unneeded "$PREFIX/lib/libopenblas.so" 2>/dev/null || true
+fi
+
 # ---------------- qhull（matplotlib；CMake ≥4 需 POLICY_VERSION_MINIMUM）----------------
 if [ ! -f "$PREFIX/lib/libqhull_r.so.8.0" ]; then
   log "qhull $QHULL_VERSION"
@@ -245,7 +307,7 @@ if [ ! -f "$PREFIX/lib/libqhull_r.so.8.0" ]; then
 fi
 
 # ---- 产物自校验（九库在场 + ELF aarch64 抽查 + pkgconfig 汇总）----
-EXPECT="libz.so libssl.so.3 libcrypto.so.3 libffi.so.8 libfreetype.so.6 libpng16.so.16 libjpeg.so.62 libxml2.so.2 libxslt.so.1 libexslt.so.0 libqhull_r.so.8.0"
+EXPECT="libz.so libssl.so.3 libcrypto.so.3 libffi.so.8 libfreetype.so.6 libpng16.so.16 libjpeg.so.62 libxml2.so.2 libxslt.so.1 libexslt.so.0 libqhull_r.so.8.0 libopenblas.so"
 for lib in $EXPECT; do
   if [ ! -s "$PREFIX/lib/$lib" ]; then
     echo "错误：依赖库缺失或为空：$PREFIX/lib/$lib（构建不完整，查 $LOGS/ 对应日志）。" >&2
