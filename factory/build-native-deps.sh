@@ -134,7 +134,9 @@ if [ ! -f "$PREFIX/lib/libssl.so.3" ]; then
       "--sysroot=$SYSROOT -O2 -fPIC -fuse-ld=lld -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0" \
       > "$LOGS/openssl-configure.log" 2>&1
     make -j"$(nproc)" > "$LOGS/openssl-build.log" 2>&1 \
-    && make install_sw > "$LOGS/openssl-install.log" 2>&1 )
+    && make install_sw install_dev > "$LOGS/openssl-install.log" 2>&1 )
+  # install_dev 必须带：install_sw 只装库不装头/pc——第五轮实锤 configure 探不到
+  # openssl/ssl.h 而**静默跳过 _ssl**（cpython job 的「_ssl 未编出」自检拦截）
   # SONAME = libssl.so.3 / libcrypto.so.3，保持原样（设备按名字找）
 fi
 
