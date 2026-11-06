@@ -1,0 +1,120 @@
+# 门 0 构建工厂 workflow：GitHub Actions ubuntu 交叉编译 CPython 3.13.18 → OHOS aarch64。
+# 部署位置（GitHub 构建仓）：.github/workflows/build.yml（脚本本体在仓内 factory/ 下）。
+# 任务书：docs/任务书-鸿蒙Python运行时门0门1-20261106.md U2 节。
+#
+# ── SDK 取版决策（2026-11-06 实测，理由留档）────────────────────────────────
+# 实测 https://repo.huaweicloud.com/openharmony/os/ 目录：最高只有 7.0-Release，
+# 无 26 系——OpenHarmony 社区版本号体系（1.x~7.x）与 DevEco 的 API 版本（26）不同，
+# API 26 的 Linux SDK 不在该公开目录分发（须走 DevEco Studio 下载器，无公开直链）。
+# 故按预案取 7.0-Release 的 ohos-sdk-windows_linux-public_20260829.tar.gz：
+#   1) wyy520110/ohos-python-builder 实证同 URL 可在 Actions 编出 Python 3.14；
+#   2) 该文件 HEAD 200 实测（3,671,263,766 B），官方同目录提供 .sha256 可校验；
+#   3) 取带日期版而非无日期版：内容钉死不漂移，缓存 key 稳定（无日期版实测为
+#      另一构建，3,384,355,680 B，Last-Modified 不同）；
+#   4) CPython 交叉编译只消费 native 侧 clang/lld 与 sysroot 的 musl libc/libm/libdl，
+#      不触及 ArkTS/NAPI API 面；7.0 sysroot（musl 1.2.x、aarch64-linux-ohos triple）
+#      与本机 DevEco API 26 工具链同体系，产物 ABI 兼容。若门 1 真机验证出 ABI 面
+#      问题，再回头重议取版。
+#
+# ── 磁盘与时间预算（Actions runner 约 14GB 可用 / 单 job 90 分钟限额）──────
+# 下载 tar 3.42GB → 全量解压（windows+linux 两侧约 7-8GB）→ 立删 tar →
+# 只 unzip linux 侧 native（约 3-4GB）→ 删 zip 与两侧解压残留 → CPython 源码与
+# 构建树约 2-3GB。峰值控制在限额内靠「装完即删」。编译 make -j$(nproc)（4 核，
+# 两遍 make 约 25-45 分钟）+ 首次下载 10-20 分钟，整轮目标 <80 分钟；SDK 缓存
+# 命中后整轮约 35-50 分钟。
+name: build-cpython-ohos
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'factory/**'
+
+env:
+  SDK_URL: https://repo.huaweicloud.com/openharmony/os/7.0-Release/ohos-sdk-windows_linux-public_20260829.tar.gz
+  SDK_SHA256: 6bf6ae1efe8de0e8bd15ddbd7fac58bcb54d9620262a541b9b219439317a4c42
+  SDK_FILENAME: ohos-sdk-windows_linux-public_20260829.tar.gz
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 85
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup build python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      # 只缓存解压后的 linux 侧 native 目录（约 3-4GB，zstd 压缩后远低于单缓存
+      # 10GB 限额）；key 含 SDK 文件名（带日期），换版自动失效。
+      - name: Restore OHOS SDK cache
+        id: sdk
+        uses: actions/cache@v4
+        with:
+          path: ~/ohos-sdk-native
+          key: ohos-sdk-native-${{ env.SDK_FILENAME }}
+
+      - name: Download and extract OHOS SDK (linux native)
+        if: steps.sdk.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          cd "$RUNNER_TEMP"
+          # 3.42GB 下载：-C - 断点续传 + --retry；curl 默认每 5 秒打印一次进度到日志
+          curl -C - --retry 3 --retry-delay 10 -o "$SDK_FILENAME" "$SDK_URL"
+          echo "$SDK_SHA256  $SDK_FILENAME" | sha256sum -c -
+          tar -xzf "$SDK_FILENAME"
+          rm -f "$SDK_FILENAME"
+          # 包结构（wyy 实证形态）：外层 tar 解出 ohos-sdk/{linux,windows}/，
+          # 两侧均为 zip 需再解开；构建只需要 linux 侧 native
+          cd ohos-sdk/linux
+          unzip -q native-linux-x64-*.zip
+          rm -f ./*.zip
+          mv native "$HOME/ohos-sdk-native"
+          # 清理两侧解压残留，控制磁盘峰值
+          cd "$RUNNER_TEMP" && rm -rf ohos-sdk
+
+      - name: Build CPython 3.13.18 for OHOS aarch64
+        run: |
+          set -euxo pipefail
+          SDK_NATIVE="$HOME/ohos-sdk-native" \
+          BUILD_PYTHON=python3.13 \
+          OUT_DIR="$GITHUB_WORKSPACE/out" \
+          bash factory/build-cpython-ohos.sh
+
+      - name: Verify artifacts (five items, non-zero bytes)
+        run: |
+          set -euxo pipefail
+          cd "$GITHUB_WORKSPACE"
+          TAR="out/cpython-ohos-3.13.18-aarch64.tar.gz"
+          [ -s "$TAR" ] || { echo "缺少产物 tarball：$TAR"; exit 1; }
+          rm -rf verify && mkdir verify
+          tar -xzf "$TAR" -C verify
+          cd verify
+          for f in libpython3.13.so python313.zip libz.so build-log.txt; do
+            [ -s "$f" ] || { echo "产物缺失或零字节：$f"; exit 1; }
+          done
+          N="$(find modules -name '*.so' -type f | wc -l)"
+          [ "$N" -ge 10 ] || { echo "C 扩展数量异常：$N（预期 40+，下限 10）"; exit 1; }
+          find modules -name '*.so' -type f -size 0 | grep -q . \
+            && { echo "存在零字节扩展"; exit 1; } || true
+          # 架构抽查：任一非 aarch64 ELF 即刻暴露（file 输出进日志供取证）
+          file libpython3.13.so libz.so modules/*.so | tee arch-report.txt
+          grep -c 'ARM aarch64' arch-report.txt >/dev/null
+          grep -v 'ARM aarch64' arch-report.txt | grep -q ELF \
+            && { echo "存在非 aarch64 的 ELF 产物"; exit 1; } || true
+          echo "== 五件字节数表 =="
+          ls -l libpython3.13.so python313.zip libz.so build-log.txt \
+            | awk '{printf "%12d B  %s\n", $5, $9}'
+          echo "扩展模块：$N 个（modules/）"
+          ls -l ../out/cpython-ohos-3.13.18-aarch64.tar.gz | awk '{printf "%12d B  %s\n", $5, $9}'
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpython-ohos-3.13.18-aarch64
+          path: out/cpython-ohos-3.13.18-aarch64.tar.gz
+          retention-days: 30
+          if-no-files-found: error
