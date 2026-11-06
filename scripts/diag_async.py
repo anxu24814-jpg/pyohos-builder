@@ -58,7 +58,8 @@ def run_case(name, submit_fn, expect_window):
     result = {}
     box = {'ready': threading.Event()}
     def worker():
-        box['ptr'] = GetThisThreadState()
+        box["ptr"] = GetThisThreadState()
+        box["tid"] = threading.get_ident()
         box['ready'].set()
         g = {}
         try:
@@ -101,7 +102,7 @@ def submit_async_exc(box):
     SetAsyncExc = pydll.PyThreadState_SetAsyncExc
     SetAsyncExc.restype = ctypes.c_int
     SetAsyncExc.argtypes = [ctypes.c_void_p, ctypes.py_object]
-    rc = SetAsyncExc(box['ptr'], KeyboardInterrupt)
+    rc = SetAsyncExc(box["tid"], KeyboardInterrupt)  # 参数 = 线程 ID（源码 tstate->thread_id 比对）
     print(f'[B-sniper] rc={rc}', flush=True)
 
 # run_case('A-pending-call', submit_pending, None)  # 3.13 已证：不生效且 SIGSEGV，跳过防拖垮 B
