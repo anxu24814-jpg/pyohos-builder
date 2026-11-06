@@ -109,7 +109,11 @@ if [ ! -f "$PREFIX/lib/libssl.so.3" ]; then
   cd "$WORK"
   fetch "https://codeload.github.com/openssl/openssl/tar.gz/refs/tags/openssl-$OPENSSL_VERSION" \
     "openssl-$OPENSSL_VERSION.tar.gz"
-  [ -d "openssl-$OPENSSL_VERSION" ] || tar xzf "openssl-$OPENSSL_VERSION.tar.gz"
+  if [ ! -d "openssl-$OPENSSL_VERSION" ]; then
+    tar xzf "openssl-$OPENSSL_VERSION.tar.gz"
+    # codeload 顶层名 = openssl-openssl-3.5.4（tag 自带 openssl- 前缀不被 GitHub 剥离），对齐
+    [ -d "openssl-$OPENSSL_VERSION" ] || mv "openssl-openssl-$OPENSSL_VERSION" "openssl-$OPENSSL_VERSION"
+  fi
   ( cd "openssl-$OPENSSL_VERSION" && [ -f Makefile ] || ./Configure linux-aarch64 \
       --prefix="$PREFIX" --openssldir="$PREFIX/ssl" \
       shared no-tests --with-rand-seed=getrandom -D__MUSL__ \
