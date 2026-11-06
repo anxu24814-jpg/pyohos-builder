@@ -142,12 +142,12 @@ fi
 if [ ! -f "$PREFIX/lib/libffi.so.8" ]; then
   log "libffi $LIBFFI_VERSION"
   cd "$WORK"
-  fetch "https://codeload.github.com/libffi/libffi/tar.gz/refs/tags/v$LIBFFI_VERSION" \
+  # 用 release 发行版 tarball（自带 configure）——codeload 源码 tarball 要 autoreconf，
+  # Actions 的 aclocal 缺 LT_SYS_SYMBOL_USCORE 宏路径（第三轮实锤），绕开 autotools
+  fetch "https://github.com/libffi/libffi/releases/download/v$LIBFFI_VERSION/libffi-$LIBFFI_VERSION.tar.gz" \
     "libffi-$LIBFFI_VERSION.tar.gz"
   [ -d "libffi-$LIBFFI_VERSION" ] || tar xzf "libffi-$LIBFFI_VERSION.tar.gz"
   ( cd "libffi-$LIBFFI_VERSION" \
-    && { [ -x ./configure ] || ./autogen.sh > "$LOGS/libffi-autogen.log" 2>&1 \
-         || autoreconf -fi > "$LOGS/libffi-autogen.log" 2>&1; } \
     && ./configure --host=aarch64-linux-gnu --build=x86_64-linux-gnu \
       --prefix="$PREFIX" --disable-static --enable-shared \
       CFLAGS="$XFLAGS" LDFLAGS="$XLDFLAGS" \
@@ -208,14 +208,15 @@ if [ ! -f "$PREFIX/lib/libjpeg.so.62" ]; then
     && make install > "$LOGS/libjpeg-install.log" 2>&1 )
 fi
 
-# ---------------- libxml2 / libxslt（lxml；GitHub tag 无 configure，先 autoreconf）----------------
+# ---------------- libxml2 / libxslt（lxml；GNOME 发行版 tarball 自带 configure——
+#                  codeload 源码树要 autoreconf，Actions 有 aclocal 宏路径坑，绕开）----------------
 if [ ! -f "$PREFIX/lib/libxml2.so.2" ]; then
   log "libxml2 $LIBXML2_VERSION"
   cd "$WORK"
-  fetch "https://codeload.github.com/GNOME/libxml2/tar.gz/refs/tags/v$LIBXML2_VERSION" \
-    "libxml2-$LIBXML2_VERSION.tar.gz"
-  [ -d "libxml2-$LIBXML2_VERSION" ] || tar xzf "libxml2-$LIBXML2_VERSION.tar.gz"
-  ( cd "libxml2-$LIBXML2_VERSION" && { [ -x ./configure ] || autoreconf -fi > "$LOGS/libxml2-autogen.log" 2>&1; } \
+  fetch "https://download.gnome.org/sources/libxml2/${LIBXML2_VERSION%.*}/libxml2-$LIBXML2_VERSION.tar.xz" \
+    "libxml2-$LIBXML2_VERSION.tar.xz"
+  [ -d "libxml2-$LIBXML2_VERSION" ] || tar xf "libxml2-$LIBXML2_VERSION.tar.xz"
+  ( cd "libxml2-$LIBXML2_VERSION" \
     && ./configure --host=aarch64-linux-gnu --build=x86_64-linux-gnu --prefix="$PREFIX" \
       --disable-static --without-python --without-lzma --without-zlib --without-iconv \
       CFLAGS="$XFLAGS" LDFLAGS="$XLDFLAGS" \
@@ -226,10 +227,10 @@ fi
 if [ ! -f "$PREFIX/lib/libxslt.so.1" ]; then
   log "libxslt $LIBXSLT_VERSION"
   cd "$WORK"
-  fetch "https://codeload.github.com/GNOME/libxslt/tar.gz/refs/tags/v$LIBXSLT_VERSION" \
-    "libxslt-$LIBXSLT_VERSION.tar.gz"
-  [ -d "libxslt-$LIBXSLT_VERSION" ] || tar xzf "libxslt-$LIBXSLT_VERSION.tar.gz"
-  ( cd "libxslt-$LIBXSLT_VERSION" && { [ -x ./configure ] || autoreconf -fi > "$LOGS/libxslt-autogen.log" 2>&1; } \
+  fetch "https://download.gnome.org/sources/libxslt/${LIBXSLT_VERSION%.*}/libxslt-$LIBXSLT_VERSION.tar.xz" \
+    "libxslt-$LIBXSLT_VERSION.tar.xz"
+  [ -d "libxslt-$LIBXSLT_VERSION" ] || tar xf "libxslt-$LIBXSLT_VERSION.tar.xz"
+  ( cd "libxslt-$LIBXSLT_VERSION" \
     && ./configure --host=aarch64-linux-gnu --build=x86_64-linux-gnu --prefix="$PREFIX" \
       --disable-static --without-python --without-crypto --with-libxml-prefix="$PREFIX" \
       CFLAGS="$XFLAGS -I$PREFIX/include" LDFLAGS="$XLDFLAGS -L$PREFIX/lib" \
