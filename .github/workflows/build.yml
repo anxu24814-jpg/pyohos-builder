@@ -24,11 +24,10 @@
 # 命中后整轮约 35-50 分钟。
 name: build-cpython-ohos
 
+# 2026-11-07 起 push 触发收窄为 dispatch-only：门 0 从零绿已验（变更记录 2116 节），
+# 工厂迭代期防 factory/** 推送误触发 35~50 分钟的全量重跑；门 2 形态走 build-gate2.yml。
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - 'factory/**'
 
 env:
   SDK_URL: https://repo.huaweicloud.com/openharmony/os/7.0-Release/ohos-sdk-windows_linux-public_20260829.tar.gz
