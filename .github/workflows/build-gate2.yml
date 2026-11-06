@@ -1,0 +1,178 @@
+# 门 2 构建工厂 workflow（2026-11-07 闲 1 起）：依赖基座 + CPython 扩展供给形态重建。
+# 部署位置（GitHub 构建仓）：.github/workflows/build-gate2.yml（脚本本体在仓内 factory/ 下）。
+# 方案依据：docs/方案-鸿蒙内置Python运行环境-20261106.md §6.1 闲 1（门 2 全量起步笔）。
+#
+# ── 结构（两 job 串行接力，每 job 独立缓存/产物）──────────────────────────────
+#   job deps   ：build-native-deps.sh 编九个原生依赖 → artifact ohos-py-deps-prefix
+#                （OpenSSL/libffi/freetype/libpng/libjpeg/libxml2/libxslt/qhull/zlib，
+#                 全 native 交叉编译无 qemu，预计 20~40 分钟）
+#   job cpython：build-cpython-ohos.sh 带 PY_DEPS_PREFIX 重建——解禁 _ctypes、
+#                供给 _ssl/_hashlib、全部扩展重链 DT_NEEDED libpython →
+#                artifact cpython-ohos-3.13.18-aarch64-g2（含 deps-libs/）
+# 时间预算：两 job 各自压 90 分钟限额内（SDK 缓存命中后 cpython 约 35~50 分钟）。
+# 包构建（24 件）属后续 workflow，不在本文件。
+name: build-gate2
+
+on:
+  workflow_dispatch:
+
+env:
+  SDK_URL: https://repo.huaweicloud.com/openharmony/os/7.0-Release/ohos-sdk-windows_linux-public_20260829.tar.gz
+  SDK_SHA256: 6bf6ae1efe8de0e8bd15ddbd7fac58bcb54d9620262a541b9b219439317a4c42
+  SDK_FILENAME: ohos-sdk-windows_linux-public_20260829.tar.gz
+
+jobs:
+  deps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore OHOS SDK cache
+        id: sdk
+        uses: actions/cache@v4
+        with:
+          path: ~/ohos-sdk-native
+          key: ohos-sdk-native-${{ env.SDK_FILENAME }}
+
+      - name: Download and extract OHOS SDK (linux native)
+        if: steps.sdk.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          cd "$RUNNER_TEMP"
+          curl -C - --retry 3 --retry-delay 10 -o "$SDK_FILENAME" "$SDK_URL"
+          echo "$SDK_SHA256  $SDK_FILENAME" | sha256sum -c -
+          tar -xzf "$SDK_FILENAME"
+          rm -f "$SDK_FILENAME"
+          cd ohos-sdk/linux
+          unzip -q native-linux-x64-*.zip
+          rm -f ./*.zip
+          mv native "$HOME/ohos-sdk-native"
+          cd "$RUNNER_TEMP" && rm -rf ohos-sdk
+
+      - name: Build native deps (nine libraries)
+        run: |
+          set -euxo pipefail
+          SDK_NATIVE="$HOME/ohos-sdk-native" \
+          PREFIX="$HOME/ohos-py-deps/prefix" \
+          bash factory/build-native-deps.sh
+
+      - name: Pack deps prefix artifact
+        run: |
+          set -euxo pipefail
+          mkdir -p "$RUNNER_TEMP/pack"
+          tar -czf "$RUNNER_TEMP/pack/ohos-py-deps-prefix.tar.gz" -C "$HOME/ohos-py-deps" prefix
+          ls -l "$RUNNER_TEMP/pack" | awk '{printf "%12d B  %s\n", $5, $9}'
+
+      - name: Upload deps prefix
+        uses: actions/upload-artifact@v4
+        with:
+          name: ohos-py-deps-prefix
+          path: ${{ runner.temp }}/pack/ohos-py-deps-prefix.tar.gz
+          retention-days: 30
+          if-no-files-found: error
+
+  cpython:
+    runs-on: ubuntu-latest
+    timeout-minutes: 85
+    needs: deps
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup build python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Restore OHOS SDK cache
+        id: sdk
+        uses: actions/cache@v4
+        with:
+          path: ~/ohos-sdk-native
+          key: ohos-sdk-native-${{ env.SDK_FILENAME }}
+
+      - name: Download and extract OHOS SDK (linux native)
+        if: steps.sdk.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          cd "$RUNNER_TEMP"
+          curl -C - --retry 3 --retry-delay 10 -o "$SDK_FILENAME" "$SDK_URL"
+          echo "$SDK_SHA256  $SDK_FILENAME" | sha256sum -c -
+          tar -xzf "$SDK_FILENAME"
+          rm -f "$SDK_FILENAME"
+          cd ohos-sdk/linux
+          unzip -q native-linux-x64-*.zip
+          rm -f ./*.zip
+          mv native "$HOME/ohos-sdk-native"
+          cd "$RUNNER_TEMP" && rm -rf ohos-sdk
+
+      - name: Download deps prefix
+        uses: actions/download-artifact@v4
+        with:
+          name: ohos-py-deps-prefix
+
+      - name: Unpack deps prefix
+        run: |
+          set -euxo pipefail
+          mkdir -p "$HOME/ohos-py-deps"
+          tar -xzf ohos-py-deps-prefix.tar.gz -C "$HOME/ohos-py-deps"
+          ls "$HOME/ohos-py-deps/prefix/lib" | head -20
+
+      - name: Build CPython 3.13.18 for OHOS aarch64 (gate2 form)
+        run: |
+          set -euxo pipefail
+          SDK_NATIVE="$HOME/ohos-sdk-native" \
+          BUILD_PYTHON=python3.13 \
+          OUT_DIR="$GITHUB_WORKSPACE/out" \
+          PY_DEPS_PREFIX="$HOME/ohos-py-deps/prefix" \
+          bash factory/build-cpython-ohos.sh
+
+      - name: Verify artifacts (gate2 form)
+        run: |
+          set -euxo pipefail
+          cd "$GITHUB_WORKSPACE"
+          TAR="out/cpython-ohos-3.13.18-aarch64-g2.tar.gz"
+          [ -s "$TAR" ] || { echo "缺少产物 tarball：$TAR"; exit 1; }
+          rm -rf verify && mkdir verify
+          tar -xzf "$TAR" -C verify
+          cd verify
+          for f in libpython3.13.so python313.zip libz.so build-log.txt; do
+            [ -s "$f" ] || { echo "产物缺失或零字节：$f"; exit 1; }
+          done
+          # 门 2 关键自检：_ssl/_hashlib/_ctypes 三扩展在场 + ELF aarch64
+          for mod in _ssl _hashlib _ctypes; do
+            ls modules/$mod.*.so >/dev/null 2>&1 || { echo "扩展缺失：$mod"; exit 1; }
+          done
+          N="$(find modules -name '*.so' -type f | wc -l)"
+          [ "$N" -ge 13 ] || { echo "C 扩展数量异常：$N"; exit 1; }
+          for lib in libssl.so.3 libcrypto.so.3 libffi.so.8; do
+            [ -s "deps-libs/$lib" ] || { echo "deps-libs 缺失：$lib"; exit 1; }
+          done
+          # host-bundle：包构建 qemu 环境的原料（可执行 + include 树 + libpython）
+          [ -x "host-bundle/bin/python3.13" ] || { echo "host-bundle 缺 bin/python3.13"; exit 1; }
+          [ -s "host-bundle/lib/libpython3.13.so" ] || { echo "host-bundle 缺 libpython"; exit 1; }
+          [ -s "host-bundle/include/python3.13/Python.h" ] || { echo "host-bundle 缺 include 树"; exit 1; }
+          file libpython3.13.so libz.so deps-libs/*.so modules/*.so | tee arch-report.txt
+          grep -v 'ARM aarch64' arch-report.txt | grep -q ELF \
+            && { echo "存在非 aarch64 的 ELF 产物"; exit 1; } || true
+          # 扩展 DT_NEEDED libpython 抽查（机制坑 B；全量守卫在包构建 workflow 的
+          # check-sonames 环节，这里抽 _ssl/_ctypes 两个新解禁扩展）
+          READELF="$HOME/ohos-sdk-native/llvm/bin/llvm-readelf"
+          for mod in modules/_ssl.*.so modules/_ctypes.*.so modules/math.*.so; do
+            "$READELF" -d "$mod" | grep -q 'libpython3.13.so' \
+              || { echo "扩展缺 DT_NEEDED libpython3.13.so：$mod"; exit 1; }
+          done
+          echo "== 门 2 tarball 字节数表 =="
+          ls -l libpython3.13.so python313.zip libz.so build-log.txt deps-libs/* \
+            ../out/cpython-ohos-3.13.18-aarch64-g2.tar.gz | awk '{printf "%12d B  %s\n", $5, $9}'
+          echo "扩展模块：$N 个（modules/）"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpython-ohos-3.13.18-aarch64-g2
+          path: out/cpython-ohos-3.13.18-aarch64-g2.tar.gz
+          retention-days: 30
+          if-no-files-found: error
