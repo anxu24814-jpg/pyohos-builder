@@ -686,6 +686,11 @@ def _mpl_png():
 def _cffi():
     import cffi
     return cffi.FFI().sizeof("int")
+def _lxml_etree():
+    # __import__("lxml.etree") 返回顶层 lxml 包而非子模块（第十五跑实锤 lxml-parse 报
+    # 'lxml' has no attribute 'fromstring'——冒烟脚本自身缺陷，非产品问题）
+    from importlib import import_module
+    return import_module("lxml.etree")
 check("zlib-ssl-ctypes", _stdlib_exts)
 check("openpyxl", lambda: __import__("openpyxl").__version__)
 check("dateutil", lambda: __import__("dateutil").__version__)
@@ -702,8 +707,8 @@ check("cffi-ffi-sizeof", lambda: _cffi())
 check("kiwisolver", lambda: __import__("kiwisolver").__version__)
 check("contourpy", lambda: __import__("contourpy").__version__)
 check("matplotlib-agg", lambda: _mpl_png())
-check("lxml-xpath", lambda: __import__("lxml.etree").__version__)
-check("lxml-parse", lambda: __import__("lxml.etree").fromstring(b"<a x='1'/>").get("x"))
+check("lxml-xpath", lambda: _lxml_etree().__version__)
+check("lxml-parse", lambda: _lxml_etree().fromstring(b"<a x='1'/>").get("x"))
 print("SMOKE-OK", len(ok), "items passed")
 EOF
   ( cd "$VWORK" && ./run-verify.sh smoke_all.py ) \
