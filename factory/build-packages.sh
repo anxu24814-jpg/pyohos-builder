@@ -294,13 +294,22 @@ for root, dirs, _ in os.walk(src):
 if not pkg_dirs:
     print('错误：找不到包目录', name); sys.exit(1)
 pd = pkg_dirs[0]
-# 0) 源码根顶层扩展 .so 平铺进 libs（cffi 的 _cffi_backend 是顶层模块、不属任何包目录，
-#    只拷包目录会把它整个丢掉——第十三跑 verify 实锤 No module named '_cffi_backend'）
+# 0) 顶层扩展 .so 平铺（不属于任何包目录的模块，如 cffi 的 _cffi_backend，只拷包目录
+#    会整个丢掉——第十三跑实锤）。候选 = 源码根 + src/（package_dir={"":"src"} 的包把顶层
+#    扩展 inplace 到 src/ 而非源码根——cffi 1.17.1 即此形态，第十四跑实锤根目录无 .so）
 os.makedirs(os.path.join(out, 'libs'), exist_ok=True)
-for f in sorted(os.listdir(src)):
-    if f.endswith('.so') and os.path.isfile(os.path.join(src, f)):
-        shutil.copy2(os.path.join(src, f), os.path.join(out, 'libs', f))
-        print('顶层扩展平铺', f)
+top_exts = []
+for base in (src, os.path.join(src, 'src')):
+    if not os.path.isdir(base):
+        continue
+    for f in sorted(os.listdir(base)):
+        p = os.path.join(base, f)
+        if f.endswith('.so') and os.path.isfile(p):
+            top_exts.append(p)
+            shutil.copy2(p, os.path.join(out, 'libs', f))
+            # TGT_SITE 根同步（后续包构建期 import 该顶层模块要用）
+            shutil.copy2(p, os.path.join(tgt, f))
+            print('顶层扩展平铺', f)
 # 1) .so 树 → libs（包目录形态保留）
 dst_libs = os.path.join(out, 'libs', os.path.basename(pd))
 shutil.rmtree(dst_libs, ignore_errors=True)
