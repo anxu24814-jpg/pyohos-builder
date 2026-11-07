@@ -308,9 +308,13 @@ if [ -n "$PY_DEPS_PREFIX" ]; then
     cp -f "$PY_DEPS_PREFIX/lib/$lib" "$OUT_DIR/deps-libs/"
     "$STRIP" --strip-unneeded "$OUT_DIR/deps-libs/$lib" 2>/dev/null || true
   done
-  # 门 2 自检：_ssl/_hashlib/_ctypes 必须在场（解禁失败的静默跳过在此拦截）
+  # 门 2 自检：_ssl/_hashlib/_ctypes 必须在场（解禁失败的静默跳过在此拦截）。
+  # 匹配用精确文件名 $mod$EXT_SUFFIX——EXT_SUFFIX 自带前导点（.cpython-313.so），
+  # 旧写法 "$mod."*"$EXT_SUFFIX" 展开成 _ssl.*.cpython-313.so，与实际文件名
+  # _ssl.cpython-313.so 永不匹配 = 恒假自检（第 8~10 轮三连红的真凶，扩展实际
+  # 一直在场：lib-dynload=52=构建树，第十轮证据行实锤）
   for mod in _ssl _hashlib _ctypes; do
-    if ! ls "$OUT_DIR/modules/$mod."*"$EXT_SUFFIX" >/dev/null 2>&1; then
+    if [ ! -e "$OUT_DIR/modules/$mod$EXT_SUFFIX" ]; then
       echo "错误：扩展 $mod 未编出（deps 形态下应已解禁）。诊断证据：" >&2
       echo "== Modules/ 实际编出的扩展（$EXT_SUFFIX）==" >&2
       ( cd "$WORK/Python-$PY_VERSION" 2>/dev/null && ls Modules/*"$EXT_SUFFIX" 2>/dev/null | wc -l \
