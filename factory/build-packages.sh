@@ -223,6 +223,11 @@ setup_env() {
   export CFLAGS="-O2 -fPIC -I$PYINC -I$PY_DEPS_PREFIX/include"
   export CXXFLAGS="-O2 -fPIC -I$PYINC -I$PY_DEPS_PREFIX/include"
   export LDFLAGS="-fuse-ld=lld -L$PYLIB -L$PY_DEPS_PREFIX/lib"
+  # lxml 等 setup.py 的 pkg-config 探测（libxml2/libxslt 在基座 prefix；首跑实锤
+  # setup 段缺这两行 → 「Please make sure the libxml2 and libxslt development
+  # packages are installed」）
+  export PKG_CONFIG_LIBDIR="$WORK/pkgconfig:$PY_DEPS_PREFIX/lib/pkgconfig"
+  export PKG_CONFIG_PATH="$WORK/pkgconfig"
   export MAX_CONCURRENCY="$(nproc)"
 }
 
@@ -323,6 +328,11 @@ fi
 MESON_CROSS="$WORK/cross-pkgs.txt"
 write_cross_file() {
   mkdir -p "$WORK/pkgconfig"
+  # numpy 系 vendored meson 的 cython 语言探测只认 PATH（cross file 的 [binaries]
+  # cython 条目不进探测列表，首跑实锤 Unknown compiler(s): [['cython'],['cython3']]）
+  # ——把 run-cython.sh 链接成 PATH 可见的 cython，build_meson_pkg 子 shell 前置此目录
+  mkdir -p "$WORK/bin"
+  ln -sf "$RUN_CY" "$WORK/bin/cython"
   cat > "$WORK/pkgconfig/python-3.13.pc" <<EOF
 prefix=$ROOTFS/usr/local
 exec_prefix=\${prefix}
@@ -387,6 +397,7 @@ build_meson_pkg() {
   write_cross_file
   (
     cd "$dir"
+    export PATH="$WORK/bin:$PATH"
     rm -rf builddir
     PKG_CONFIG_LIBDIR="$WORK/pkgconfig:$PY_DEPS_PREFIX/lib/pkgconfig" \
     PKG_CONFIG_PATH="$WORK/pkgconfig" PKG_CONFIG_ALLOW_CROSS=1 \
