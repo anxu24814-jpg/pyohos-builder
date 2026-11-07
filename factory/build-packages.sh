@@ -121,6 +121,9 @@ if want rootfs; then
   cp -f "$G2_DIR/modules/"*.so "$TGT_LIBS/"
   cp -f "$G2_DIR/libz.so" "$TGT_LIBS/"
   for lib in "$G2_DIR"/deps-libs/*.so*; do cp -f "$lib" "$TGT_LIBS/"; done
+  # numpy 等 C++ 扩展的 DT_NEEDED libc++_shared.so（OHOS clang++ 共享 libc++；bundle 段同件随包，
+  # 第十跑探针实 qemu 构建期装载面也缺——不拷则 import/pandas 内省必挂）
+  cp -f "$SDK_NATIVE/llvm/lib/aarch64-linux-ohos/libc++_shared.so" "$TGT_LIBS/"
 
   # qemu 冒烟环境的符号差集存根（Guncat 同法）：Alpine musl 与 OHOS musl 的差集——
   # backtrace 族（OHOS libc 有、标准 musl 无）+ __fd_chk（OHOS musl 私有 fd 加固符号，
@@ -164,11 +167,13 @@ EOF
   # 目标侧构建依赖（纯 py wheel 解进 TGT_SITE）：setuptools/wheel/packaging 供 setup.py，
   # Cython 供 run-cython，pybind11 头供 contourpy/matplotlib，cppy 供 kiwisolver，
   # setuptools_scm 供 matplotlib meson.build 的 run_command 内省，
-  # versioneer 供 pandas generate_version.py（第八跑实锤目标解释器 import 失败）
+  # versioneer 供 pandas generate_version.py（第八跑实锤目标解释器 import 失败），
+  # meson-python 供 contourpy build 期查 importlib.metadata 版本（第十跑实锤目标侧缺 dist-info）
   if [ ! -d "$TGT_SITE/setuptools" ]; then
     for dep in "setuptools==$V_setuptools" "wheel==$V_wheel" "packaging==$V_packaging" \
                "Cython==$CYTHON_VERSION" "pybind11==3.0.1" "cppy==1.3.0" \
-               "setuptools_scm==9.2.2" "flit-core==$V_flit_core" "versioneer==0.29"; do
+               "setuptools_scm==9.2.2" "flit-core==$V_flit_core" "versioneer==0.29" \
+               "meson-python==0.22.1"; do
       python3 -m pip download "${dep%%=*}==${dep##*=}" --no-deps --only-binary=:all: \
         --python-version 3.13 --implementation py --abi none --platform any \
         -d "$WORK/tgt-whl" --quiet
