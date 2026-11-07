@@ -163,11 +163,12 @@ EOF
 
   # 目标侧构建依赖（纯 py wheel 解进 TGT_SITE）：setuptools/wheel/packaging 供 setup.py，
   # Cython 供 run-cython，pybind11 头供 contourpy/matplotlib，cppy 供 kiwisolver，
-  # setuptools_scm 供 matplotlib meson.build 的 run_command 内省
+  # setuptools_scm 供 matplotlib meson.build 的 run_command 内省，
+  # versioneer 供 pandas generate_version.py（第八跑实锤目标解释器 import 失败）
   if [ ! -d "$TGT_SITE/setuptools" ]; then
     for dep in "setuptools==$V_setuptools" "wheel==$V_wheel" "packaging==$V_packaging" \
                "Cython==$CYTHON_VERSION" "pybind11==3.0.1" "cppy==1.3.0" \
-               "setuptools_scm==9.2.2" "flit-core==$V_flit_core"; do
+               "setuptools_scm==9.2.2" "flit-core==$V_flit_core" "versioneer==0.29"; do
       python3 -m pip download "${dep%%=*}==${dep##*=}" --no-deps --only-binary=:all: \
         --python-version 3.13 --implementation py --abi none --platform any \
         -d "$WORK/tgt-whl" --quiet
@@ -229,7 +230,9 @@ setup_env() {
   # setup 段缺这两行 → 「Please make sure the libxml2 and libxslt development
   # packages are installed」）
   export PKG_CONFIG_LIBDIR="$WORK/pkgconfig:$PY_DEPS_PREFIX/lib/pkgconfig"
-  export PKG_CONFIG_PATH="$WORK/pkgconfig"
+  # pybind11 的 .pc 随 wheel 落在 TGT_SITE 包树内（pybind11/share/pkgconfig，prefix 可重定位）
+  # ——不进搜索路径则 contourpy/matplotlib 的 meson 探测必失败（第八跑实锤）
+  export PKG_CONFIG_PATH="$WORK/pkgconfig:$TGT_SITE/pybind11/share/pkgconfig"
   export MAX_CONCURRENCY="$(nproc)"
 }
 
