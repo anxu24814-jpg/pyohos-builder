@@ -165,7 +165,7 @@ EOF
   if [ ! -d "$TGT_SITE/setuptools" ]; then
     for dep in "setuptools==$V_setuptools" "wheel==$V_wheel" "packaging==$V_packaging" \
                "Cython==$CYTHON_VERSION" "pybind11==3.0.1" "cppy==1.3.0" \
-               "setuptools_scm==9.2.4" "flit-core==$V_flit_core"; do
+               "setuptools_scm==9.2.2" "flit-core==$V_flit_core"; do
       python3 -m pip download "${dep%%=*}==${dep##*=}" --no-deps --only-binary=:all: \
         --python-version 3.13 --implementation py --abi none --platform any \
         -d "$WORK/tgt-whl" --quiet
