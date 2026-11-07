@@ -180,6 +180,16 @@ for w in glob.glob(sys.argv[1] + '/*.whl'):
         z.extractall(sys.argv[2])
 PY
   fi
+  # core→heavy 的 TGT_SITE 交接（yml 传 TGT_SITE_TAR 指向 core 的 tgt-site.tar.gz）：
+  # 恢复必须在本段自举 rm -rf "$ROOTFS" 之后——第九跑实锤 yml 先恢复、自举连带清掉 py/site，
+  # wheel 循环重装（日志 pip notice 实锤）而 numpy 等已编树蒸发 ⇒ pandas 内省必失败。
+  # 放 wheel 解包之后 = core 终态覆盖 wheel 初装态，顺序即正确性。
+  if [ -n "${TGT_SITE_TAR:-}" ] && [ -f "$TGT_SITE_TAR" ]; then
+    tar -xzf "$TGT_SITE_TAR" -C "$ROOTFS/py"
+    echo "== heavy 探针：TGT_SITE=$(ls "$TGT_SITE" | tr '\n' ' ')" >&2
+    "$RUN_PY" -c "import sys, numpy; print('probe-ok', numpy.__version__, file=sys.stderr)" \
+      || echo "!! heavy 探针失败：恢复态 numpy 不可 import（装载链断了）" >&2
+  fi
   mark rootfs "OK（python3.13 + zlib/ssl/ctypes 冒烟过）"
 fi
 
@@ -410,8 +420,10 @@ build_meson_pkg() {
     cd "$dir"
     export PATH="$WORK/bin:$PATH"
     rm -rf builddir
+    # 内联 env 曾与 setup_env 双源漂移（第九跑实锤 setup_env 加了 pybind11 路径此处没跟，
+    # meson 探测仍红）——改引 setup_env 的同名展开，保单源；此处必须留 PKG_CONFIG_ALLOW_CROSS
     PKG_CONFIG_LIBDIR="$WORK/pkgconfig:$PY_DEPS_PREFIX/lib/pkgconfig" \
-    PKG_CONFIG_PATH="$WORK/pkgconfig" PKG_CONFIG_ALLOW_CROSS=1 \
+    PKG_CONFIG_PATH="$WORK/pkgconfig:$TGT_SITE/pybind11/share/pkgconfig" PKG_CONFIG_ALLOW_CROSS=1 \
       $mc setup builddir --cross-file "$MESON_CROSS" \
       --prefix="$WORK/meson-prefix-$top" -Dbuildtype=release "$@" \
       > "$WORK/$top-meson-setup.log" 2>&1
@@ -471,6 +483,11 @@ if want numpy; then
     echo "错误：numpy 构建失败 —— 门 2 止损线命中（方案 §6.1 闲 1），整批停机登记。" >&2
     exit 3
   fi
+  # 探针（第九跑 heavy 段 pandas 内省 import numpy 失败但 tgt-site 树完整，矛盾待定位）：
+  # core 侧拆层完成后立即用同一 run-python.sh 冒烟 import，对照 heavy 段结果二分归因
+  echo "== numpy 探针：run-python.sh -c 'import numpy'" >&2
+  "$RUN_PY" -c "import sys, numpy; print('probe-ok', numpy.__version__, numpy.get_include(), file=sys.stderr)" \
+    || echo "!! 探针失败：core 侧 TGT_SITE 的 numpy 不可 import（与 heavy 段同病 = 树本身问题）" >&2
 fi
 if want contourpy; then
   build_meson_pkg contourpy "$V_contourpy" || true
