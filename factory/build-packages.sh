@@ -122,13 +122,17 @@ if want rootfs; then
   cp -f "$G2_DIR/libz.so" "$TGT_LIBS/"
   for lib in "$G2_DIR"/deps-libs/*.so*; do cp -f "$lib" "$TGT_LIBS/"; done
 
-  # musl 无 backtrace（OHOS libc 有）——qemu 环境存根（Guncat 同法）
+  # qemu 冒烟环境的符号差集存根（Guncat 同法）：Alpine musl 与 OHOS musl 的差集——
+  # backtrace 族（OHOS libc 有、标准 musl 无）+ __fd_chk（OHOS musl 私有 fd 加固符号，
+  # select 扩展引用、sysroot libc 供给；首跑实 qemu relocation 失败）。import 冒烟只需
+  # 符号可解析，不触发调用语义
   if [ ! -f "$TGT_LIBS/libexecinfo_stub.so" ]; then
     cat > "$WORK/execinfo-stub.c" <<'EOF'
 #include <stddef.h>
 int backtrace(void **b, int s) { (void) b; (void) s; return 0; }
 char **backtrace_symbols(void *const *b, int s) { (void) b; (void) s; return NULL; }
 void backtrace_symbols_fd(void *const *b, int s, int fd) { (void) b; (void) s; (void) fd; }
+int __fd_chk(int fd) { return fd; }
 EOF
     "$CLANG" --sysroot="$SYSROOT" -shared -fPIC -O1 -o "$TGT_LIBS/libexecinfo_stub.so" "$WORK/execinfo-stub.c"
   fi
