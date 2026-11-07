@@ -566,7 +566,10 @@ def _looks_like_libdir(path: str) -> bool:
         return False
     if "libpython3.13.so" in names:
         return True
-    return any(n.endswith(".cpython-313-aarch64-linux-gnu.so") for n in names)
+    # 后缀必须按运行解释器自身的 EXTENSION_SUFFIXES 判——第十二跑实锤硬编码 GNU 三元组
+    # （cpython-313-aarch64-linux-gnu.so）与 g2 实际命名（cpython-313.so 无三元组）错位，
+    # _LIBDIR 恒空 → finder 整个不装 → 双层布局的 C 扩展全断
+    return any(n.endswith(tuple(importlib.machinery.EXTENSION_SUFFIXES)) for n in names)
 
 
 def _find_libdir() -> str:
