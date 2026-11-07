@@ -240,7 +240,12 @@ build_setup_pkg() {
     setup_env
     rm -rf build
     "$RUN_PY" setup.py build_ext --inplace "$@" > "$WORK/$top-build.log" 2>&1
-  ) || { mark "$name" "红（构建失败，日志 $WORK/$top-build.log）"; return 1; }
+  ) || {
+    mark "$name" "红（构建失败，日志 $WORK/$top-build.log）"
+    echo "== $name build.log 尾 40 行 ==" >&2
+    tail -40 "$WORK/$top-build.log" >&2 || true
+    return 1
+  }
   python3 - "$dir" "$OUT_DIR" "$name" "$TGT_SITE" <<'PY'
 import os, shutil, sys
 src, out, name, tgt = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
@@ -391,7 +396,14 @@ build_meson_pkg() {
     $mc compile -C builddir -j "$(nproc)" > "$WORK/$top-meson-build.log" 2>&1
     rm -rf "$WORK/meson-dest-$top"
     DESTDIR="$WORK/meson-dest-$top" $mc install -C builddir > "$WORK/$top-meson-install.log" 2>&1
-  ) || { mark "$name" "红（meson 失败：setup/build/install 三段日志在 $WORK/$top-meson-*.log）"; return 1; }
+  ) || {
+    mark "$name" "红（meson 失败：setup/build/install 三段日志在 $WORK/$top-meson-*.log）"
+    for ph in setup build install; do
+      echo "== $name meson-$ph.log 尾 30 行 ==" >&2
+      tail -30 "$WORK/$top-meson-$ph.log" >&2 2>/dev/null || true
+    done
+    return 1
+  }
   python3 - "$WORK/meson-dest-$top" "$OUT_DIR" "$name" "$TGT_SITE" "$STRIP" <<'PY'
 import glob, os, shutil, subprocess, sys
 dest, out, name, tgt, strip = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
