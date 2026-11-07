@@ -174,9 +174,9 @@ jobs:
             CORE_RUN=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow build-packages --status success --limit 1 --json databaseId --jq '.[0].databaseId')
             gh run download "$CORE_RUN" --repo "$GITHUB_REPOSITORY" --name pkg-tree-core --dir "$RUNNER_TEMP/core"
           }
+          # tgt-site.tar.gz 不在此解——rootfs 自举会 rm -rf 重建 alpine 树，恢复必须在自举后
+          # （脚本内 TGT_SITE_TAR 机制，第九跑实锤先恢复被清掉）
           tar -xzf "$RUNNER_TEMP/core/pkg-tree-core.tar.gz" -C "$GITHUB_WORKSPACE"
-          mkdir -p "$HOME/ohos-py-pkgs/alpine-a64/py"
-          tar -xzf "$RUNNER_TEMP/core/tgt-site.tar.gz" -C "$HOME/ohos-py-pkgs/alpine-a64/py"
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -187,8 +187,9 @@ jobs:
                  G2_DIR="$RUNNER_TEMP/g2x" \
                  PY_DEPS_PREFIX="$HOME/ohos-py-deps/prefix" \
                  OUT_DIR="$GITHUB_WORKSPACE/pkg-out" \
-                 WORK="$HOME/ohos-py-pkgs"
-          # rootfs 幂等（TGT_SITE 已含 core 各包树，跳过重装构建依赖）
+                 WORK="$HOME/ohos-py-pkgs" \
+                 TGT_SITE_TAR="$RUNNER_TEMP/core/tgt-site.tar.gz"
+          # rootfs 自举 + TGT_SITE 交接（脚本内按序：自举 rm -rf → wheel 初装 → 恢复 core 终态）
           STAGE=rootfs bash factory/build-packages.sh
           for stage in contourpy pandas matplotlib bundle verify; do
             STAGE="$stage" bash factory/build-packages.sh
