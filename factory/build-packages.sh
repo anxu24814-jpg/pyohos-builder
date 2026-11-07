@@ -630,7 +630,9 @@ if want verify; then
 #!/bin/sh
 export PYTHONHOME=$ROOTFS/usr/local
 export PYTHONPATH=$ROOTFS/py/python313.zip:$VWORK/site-packages.zip:\$PWD/extras:\$PWD/libs
-export LD_LIBRARY_PATH=$PWD/libs
+# \$PWD 必须运行期展开——第十一跑实锤写入期展开成仓库根（不存在的 libs），ld.so 落默认路径
+# 加载 alpine minirootfs 自带旧 libcrypto（apk-tools 依赖）⇒ _ssl 重定位 COMP_get_type 失败
+export LD_LIBRARY_PATH=\$PWD/libs
 export LD_PRELOAD=$ROOTFS/py/ext/libexecinfo_stub.so
 exec qemu-aarch64-static -L $ROOTFS $ROOTFS/usr/local/bin/python3.13 "\$@"
 EOF
