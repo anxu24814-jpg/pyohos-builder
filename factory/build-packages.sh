@@ -140,7 +140,9 @@ EOF
   cat > "$ROOTFS/run-python.sh" <<EOF
 #!/bin/sh
 export PYTHONHOME=$ROOTFS/usr/local
-export PYTHONPATH=$ROOTFS/py/python313.zip:$TGT_SITE:$TGT_LIBS
+# 调用方（meson env 包装）传的 PYTHONPATH 前置保留——第七跑实锤 numpy 生成器
+# env PYTHONPATH=<src>/numpy/_core 被 export 无条件覆盖 ⇒ code_generators 找不到
+export PYTHONPATH=\${PYTHONPATH:+\$PYTHONPATH:}$ROOTFS/py/python313.zip:$TGT_SITE:$TGT_LIBS
 export LD_LIBRARY_PATH=$PYLIB:$TGT_LIBS
 export LD_PRELOAD=$TGT_LIBS/libexecinfo_stub.so
 exec qemu-aarch64-static -L $ROOTFS $ROOTFS/usr/local/bin/python3.13 "\$@"
@@ -148,7 +150,7 @@ EOF
   cat > "$ROOTFS/run-cython.sh" <<EOF
 #!/bin/sh
 export PYTHONHOME=$ROOTFS/usr/local
-export PYTHONPATH=$ROOTFS/py/python313.zip:$TGT_SITE:$TGT_LIBS
+export PYTHONPATH=\${PYTHONPATH:+\$PYTHONPATH:}$ROOTFS/py/python313.zip:$TGT_SITE:$TGT_LIBS
 export LD_LIBRARY_PATH=$PYLIB:$TGT_LIBS
 export LD_PRELOAD=$TGT_LIBS/libexecinfo_stub.so
 exec qemu-aarch64-static -L $ROOTFS $ROOTFS/usr/local/bin/python3.13 -m cython "\$@"
@@ -257,6 +259,9 @@ build_setup_pkg() {
   python3 - "$dir" "$OUT_DIR" "$name" "$TGT_SITE" <<'PY'
 import os, shutil, sys
 src, out, name, tgt = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+# import 名 ≠ 项目名走别名表（pillow→PIL，第七跑实锤定位器找不到包目录；其余包两名一致）
+alias = {'pillow': 'PIL'}
+want = alias.get(name.lower(), name.lower().replace('-', '_')).lower()
 # 定位包目录（setup.py 同级的 src/<pkg>/ 或 <pkg>/）
 pkg_dirs = []
 for root, dirs, _ in os.walk(src):
@@ -265,7 +270,7 @@ for root, dirs, _ in os.walk(src):
     if (parts[0] == 'src' and len(parts) == 2) or len(parts) == 1:
         for d in list(dirs):
             init = os.path.join(root, d, '__init__.py')
-            if os.path.exists(init) and d.lower().replace('_', '-') == name.lower().replace('-', '_'):
+            if os.path.exists(init) and d.lower().replace('-', '_') == want:
                 pkg_dirs.append(os.path.join(root, d))
     dirs[:] = [d for d in dirs if d not in ('build', 'dist', '__pycache__', '.git')]
 if not pkg_dirs:
