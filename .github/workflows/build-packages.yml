@@ -14,6 +14,12 @@ name: build-packages
 on:
   workflow_dispatch:
 
+# gh run list/download（拉 gate2 产物）需要 actions 读权——默认 token 权限不够
+# （首跑实锤 HTTP 403 Resource not accessible by integration）
+permissions:
+  actions: read
+  contents: read
+
 env:
   SDK_URL: https://repo.huaweicloud.com/openharmony/os/7.0-Release/ohos-sdk-windows_linux-public_20260829.tar.gz
   SDK_SHA256: 6bf6ae1efe8de0e8bd15ddbd7fac58bcb54d9620262a541b9b219439317a4c42
@@ -90,6 +96,8 @@ jobs:
         if: always()
         run: |
           set -euxo pipefail
+          # 前段失败无产物时不打包（防 tar 报错淹没真实错误）
+          [ -d "$GITHUB_WORKSPACE/pkg-out" ] || { echo "pkg-out 不存在，跳过打包"; exit 0; }
           mkdir -p "$RUNNER_TEMP/pack"
           tar -czf "$RUNNER_TEMP/pack/pkg-tree-core.tar.gz" -C "$GITHUB_WORKSPACE" pkg-out
           tar -czf "$RUNNER_TEMP/pack/tgt-site.tar.gz" -C "$HOME/ohos-py-pkgs/alpine-a64/py" site
@@ -152,7 +160,7 @@ jobs:
           gh run download "$G2_RUN" --repo "$GITHUB_REPOSITORY" \
             --name ohos-py-deps-prefix --dir "$RUNNER_TEMP/deps"
           gh run download "$G2_RUN" --repo "$GITHUB_REPOSITORY" \
-            --name cpython-ohs-3.13.18-aarch64-g2 --dir "$RUNNER_TEMP/g2"
+            --name cpython-ohos-3.13.18-aarch64-g2 --dir "$RUNNER_TEMP/g2"
           mkdir -p "$HOME/ohos-py-deps" "$RUNNER_TEMP/g2x"
           tar -xzf "$RUNNER_TEMP/deps/ohos-py-deps-prefix.tar.gz" -C "$HOME/ohos-py-deps"
           tar -xzf "$RUNNER_TEMP/g2/cpython-ohos-3.13.18-aarch64-g2.tar.gz" -C "$RUNNER_TEMP/g2x"
@@ -190,6 +198,8 @@ jobs:
         if: always()
         run: |
           set -euxo pipefail
+          # 前段失败无产物时不打包（防 tar 报错淹没真实错误）
+          [ -d "$GITHUB_WORKSPACE/pkg-out/libs" ] || { echo "pkg-out/libs 不存在，跳过打包"; exit 0; }
           mkdir -p "$RUNNER_TEMP/pack"
           cp -f "$GITHUB_WORKSPACE/pkg-out/site-packages.zip" "$RUNNER_TEMP/pack/"
           cp -f "$GITHUB_WORKSPACE/pkg-out/extras.zip" "$RUNNER_TEMP/pack/"
