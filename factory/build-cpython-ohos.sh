@@ -258,10 +258,16 @@ rm -f "$OUT_DIR/python${SOVER/./}.zip"
     -x 'ensurepip/*' -x 'lib-dynload/*' -x '__pycache__/*' -x '*.pyc' -x 'config-*/*' )
 
 # 3) C 扩展模块（全部带 DT_NEEDED libpython；只有应用 lib 目录 .so 可被设备 dlopen）
+# 收集源 = 构建树 Modules/（第二遍重链后的正主产物）。第九轮实锤（run 42277411840）：
+# _ssl/_hashlib/_ctypes 编出且重链成功、MODULE_*_STATE=yes，但 make install 的
+# sharedinstall 未把它们装进 lib-dynload（其余 40+ 在场）；故不以 lib-dynload 为源，
+# lib-dynload 计数仅作证据打印（差距根因见自检失败分支 dump 的 install.log）。
 rm -rf "$OUT_DIR/modules"
 mkdir -p "$OUT_DIR/modules"
-cp -f "$STDLIB"/lib-dynload/*"$EXT_SUFFIX" "$OUT_DIR/modules/" 2>/dev/null \
-  || { echo "错误：lib-dynload 里没有任何 *$EXT_SUFFIX 扩展，重链步骤可能未生效。" >&2; exit 1; }
+BLD="$WORK/Python-$PY_VERSION"
+cp -f "$BLD/Modules/"*"$EXT_SUFFIX" "$OUT_DIR/modules/" 2>/dev/null \
+  || { echo "错误：构建树 Modules/ 里没有任何 *$EXT_SUFFIX 扩展，重链步骤可能未生效。" >&2; exit 1; }
+echo "（证据）lib-dynload=$(ls "$STDLIB"/lib-dynload/*"$EXT_SUFFIX" 2>/dev/null | wc -l) 个，构建树=$(ls "$BLD/Modules/"*"$EXT_SUFFIX" | wc -l) 个"
 EXT_COUNT=0
 for f in "$OUT_DIR/modules"/*"$EXT_SUFFIX"; do
   [ -f "$f" ] && { "$STRIP" --strip-unneeded "$f" 2>/dev/null || true; EXT_COUNT=$((EXT_COUNT+1)); } || true
@@ -312,6 +318,11 @@ if [ -n "$PY_DEPS_PREFIX" ]; then
       echo "== Makefile 模块态 ==" >&2
       grep -E '^(MODULE__SSL_STATE|MODULE__HASHLIB_STATE|MODULE__CTYPES_STATE|MODULE__SSL__DEPS)' \
         "$WORK/Python-$PY_VERSION/Makefile" >&2 || true
+      echo "== install.log 里 sharedinstall/_ssl/lib-dynload 相关行 ==" >&2
+      grep -n -i -E "sharedinstall|_ssl|_hashlib|_ctypes|lib-dynload|Failed to build|Could not build" \
+        "$WORK/install.log" 2>/dev/null | head -40 >&2 || true
+      echo "== install.log 里 _ssl 装载行上下文 ==" >&2
+      grep -n -B2 -A2 '_ssl\.' "$WORK/install.log" 2>/dev/null | head -20 >&2 || true
       echo "== build.log 里 ssl/ffi/ctypes/WARNING/renaming 相关行 ==" >&2
       grep -n -i -E "ssl|ffi|ctypes|warning|renaming|failed" "$WORK/build.log" | tail -40 >&2 || true
       echo "== build.log 尾部 40 行 ==" >&2
