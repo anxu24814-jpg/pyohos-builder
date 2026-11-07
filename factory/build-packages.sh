@@ -294,6 +294,13 @@ for root, dirs, _ in os.walk(src):
 if not pkg_dirs:
     print('错误：找不到包目录', name); sys.exit(1)
 pd = pkg_dirs[0]
+# 0) 源码根顶层扩展 .so 平铺进 libs（cffi 的 _cffi_backend 是顶层模块、不属任何包目录，
+#    只拷包目录会把它整个丢掉——第十三跑 verify 实锤 No module named '_cffi_backend'）
+os.makedirs(os.path.join(out, 'libs'), exist_ok=True)
+for f in sorted(os.listdir(src)):
+    if f.endswith('.so') and os.path.isfile(os.path.join(src, f)):
+        shutil.copy2(os.path.join(src, f), os.path.join(out, 'libs', f))
+        print('顶层扩展平铺', f)
 # 1) .so 树 → libs（包目录形态保留）
 dst_libs = os.path.join(out, 'libs', os.path.basename(pd))
 shutil.rmtree(dst_libs, ignore_errors=True)
