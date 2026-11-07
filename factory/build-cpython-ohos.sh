@@ -337,19 +337,33 @@ if [ -n "$PY_DEPS_PREFIX" ]; then
 
   # 7) host-bundle：目标 python 可执行 + include 树（包构建 job 的 qemu 环境要
   #    「能在构建机上运行的目标解释器」跑 setup.py/meson 内省，C 编译要 Python.h/pyconfig.h）
+  # 三输入全部构建树优先（第一遍交叉链接/配置的正主）：第十一轮实锤 install 树未装出
+  # bin/python3.13（根因证据见失败分支 dump），不再绕道安装树。
   rm -rf "$OUT_DIR/host-bundle"
   mkdir -p "$OUT_DIR/host-bundle/bin" "$OUT_DIR/host-bundle/lib" "$OUT_DIR/host-bundle/include"
-  if [ ! -x "$DEST/bin/python3.13" ]; then
-    echo "错误：安装树里没有 bin/python3.13（host-bundle 无法组装）。" >&2
+  HB_PY="$PWD/python$SOVER"
+  if [ ! -x "$HB_PY" ]; then
+    echo "错误：构建树没有可执行 python$SOVER（host-bundle 无法组装）。诊断：" >&2
+    echo "== 构建树顶层 python* ==" >&2
+    ls -la "$PWD"/python* 2>/dev/null >&2 || true
+    echo "== 安装树目录结构（maxdepth 4，目录与 python* 文件）==" >&2
+    find "$DEST" -maxdepth 4 \( -type d -o -name 'python*' \) 2>/dev/null | head -30 >&2 || true
+    echo "== install.log 里 bininstall/python3.13/error 相关行 ==" >&2
+    grep -n -i -E "bininstall|altbin|python3\.13|error|failed" "$WORK/install.log" 2>/dev/null | head -30 >&2 || true
     exit 1
   fi
-  cp -f "$DEST/bin/python3.13" "$OUT_DIR/host-bundle/bin/"
+  cp -f "$HB_PY" "$OUT_DIR/host-bundle/bin/python$SOVER"
   cp -f "$PWD/libpython$SOVER.so" "$OUT_DIR/host-bundle/lib/libpython$SOVER.so"
-  cp -r "$DEST/include/python$SOVER" "$OUT_DIR/host-bundle/include/python$SOVER"
-  # 目标侧 python3.13 符号链接形态（部分工具按 python3 调用）一并带上
-  if [ -e "$DEST/bin/python3" ] && [ ! -e "$OUT_DIR/host-bundle/bin/python3" ]; then
-    ln -s python3.13 "$OUT_DIR/host-bundle/bin/python3"
+  if [ -d "$DEST/include/python$SOVER" ]; then
+    cp -r "$DEST/include/python$SOVER" "$OUT_DIR/host-bundle/include/python$SOVER"
+  else
+    # 兜底：构建树 Include/ + pyconfig.h 组装（与安装树 inclinstall 等价内容）
+    mkdir -p "$OUT_DIR/host-bundle/include/python$SOVER"
+    cp -r "$PWD/Include/." "$OUT_DIR/host-bundle/include/python$SOVER/"
+    cp -f "$PWD/pyconfig.h" "$OUT_DIR/host-bundle/include/python$SOVER/"
   fi
+  # 目标侧 python3 符号链接形态（部分工具按 python3 调用）一并带上
+  ln -sf "python$SOVER" "$OUT_DIR/host-bundle/bin/python3"
 fi
 
 # ---- 产物自校验（五件在场 + 非零字节）----
