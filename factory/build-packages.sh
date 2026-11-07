@@ -244,7 +244,10 @@ build_setup_pkg() {
     cd "$dir"
     setup_env
     rm -rf build
-    "$RUN_PY" setup.py build_ext --inplace "$@" > "$WORK/$top-build.log" 2>&1
+    # build_clib 必须显式列命令：build_ext 只从 build_clib「借」库名与 -L 目录（get_finalized_command
+    # 仅定参不执行），setup 级 libraries= 声明的静态库要 build_clib 真跑才生成——第六跑实锤
+    # pillow 13 的 libpil_imaging_mode.a 缺席致 ld.lld unable to find library；无 libraries= 的包空跑无害
+    "$RUN_PY" setup.py build_clib build_ext --inplace "$@" > "$WORK/$top-build.log" 2>&1
   ) || {
     mark "$name" "红（构建失败，日志 $WORK/$top-build.log）"
     echo "== $name build.log 尾 40 行 ==" >&2
