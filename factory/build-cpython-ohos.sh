@@ -341,15 +341,20 @@ if [ -n "$PY_DEPS_PREFIX" ]; then
   # bin/python3.13（根因证据见失败分支 dump），不再绕道安装树。
   rm -rf "$OUT_DIR/host-bundle"
   mkdir -p "$OUT_DIR/host-bundle/bin" "$OUT_DIR/host-bundle/lib" "$OUT_DIR/host-bundle/include"
-  HB_PY="$PWD/python$SOVER"
-  if [ ! -x "$HB_PY" ]; then
-    echo "错误：构建树没有可执行 python$SOVER（host-bundle 无法组装）。诊断：" >&2
+  # 可执行取三候选（第十二轮 dump 实锤：构建树可执行名是 python 无版本号——install -c
+  # python → bin/python3.13 才改名；安装树路径带 usr/local 层）。构建树正主优先。
+  HB_PY=""
+  for cand in "$PWD/python" "$DEST/usr/local/bin/python$SOVER" "$DEST/bin/python$SOVER"; do
+    if [ -x "$cand" ]; then HB_PY="$cand"; break; fi
+  done
+  if [ -z "$HB_PY" ]; then
+    echo "错误：三候选都没有可执行 python（host-bundle 无法组装）。诊断：" >&2
     echo "== 构建树顶层 python* ==" >&2
     ls -la "$PWD"/python* 2>/dev/null >&2 || true
-    echo "== 安装树目录结构（maxdepth 4，目录与 python* 文件）==" >&2
-    find "$DEST" -maxdepth 4 \( -type d -o -name 'python*' \) 2>/dev/null | head -30 >&2 || true
-    echo "== install.log 里 bininstall/python3.13/error 相关行 ==" >&2
-    grep -n -i -E "bininstall|altbin|python3\.13|error|failed" "$WORK/install.log" 2>/dev/null | head -30 >&2 || true
+    echo "== 安装树 bin 目录实况 ==" >&2
+    ls -la "$DEST/usr/local/bin/" "$DEST/bin/" 2>/dev/null >&2 || true
+    echo "== install.log 里可执行安装段 ==" >&2
+    grep -n -E "install -c (python|.*python3\.13)" "$WORK/install.log" 2>/dev/null | head -10 >&2 || true
     exit 1
   fi
   cp -f "$HB_PY" "$OUT_DIR/host-bundle/bin/python$SOVER"
