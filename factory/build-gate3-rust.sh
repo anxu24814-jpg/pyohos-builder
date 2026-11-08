@@ -263,13 +263,15 @@ print("  3.12 cffi 就绪", cffi.__version__)' \
   echo "  [env] 已钉：PYO3_PYTHON = $(command -v python3)（$CRYPTO_DIR/.cargo/config.toml）"
   maturin_pkg cryptography "$V_cryptography"
   # AESGCM 往返（libcrypto 链 + cffi 生成面同验；避免拉 ssl 深链）
+  # nonce 须 8~128 字节（第七轮 1 字节 nonce 实锤 ValueError——探针自身缺陷）
   "$RUN_PY" -c "
 import os
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from importlib.metadata import version
 k = AESGCM.generate_key(bit_length=256)
-ct = AESGCM(k).encrypt(b'n', b'smoke', b'ad')
-assert AESGCM(k).decrypt(b'n', ct, b'ad') == b'smoke'
+n = b'0123456789ab'
+ct = AESGCM(k).encrypt(n, b'smoke', b'ad')
+assert AESGCM(k).decrypt(n, ct, b'ad') == b'smoke'
 print('probe-ok cryptography', version('cryptography'))" \
     || { mark cryptography "红（qemu 探针失败）"; exit 1; }
 fi
@@ -286,8 +288,9 @@ from importlib.metadata import version
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 assert rpds.HashTrieMap(a=1)['a'] == 1
 k = AESGCM.generate_key(bit_length=256)
-ct = AESGCM(k).encrypt(b'n', b'smoke', b'ad')
-assert AESGCM(k).decrypt(b'n', ct, b'ad') == b'smoke'
+n = b'0123456789ab'
+ct = AESGCM(k).encrypt(n, b'smoke', b'ad')
+assert AESGCM(k).decrypt(n, ct, b'ad') == b'smoke'
 print("SMOKE-OK gate3-rust 3 items:", version('rpds-py'), version('pydantic-core'))
 PY
   mark verify3 "OK（3 items passed）"
