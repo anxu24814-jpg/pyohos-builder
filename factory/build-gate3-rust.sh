@@ -239,19 +239,25 @@ if want cryptography; then
   echo "== [cryptography] cryptography $V_cryptography"
   [ -d "$TGT_SITE/cffi" ] || { echo "错误：TGT_SITE 缺 cffi——先跑 build-packages.sh 的 STAGE=cffi。" >&2; exit 1; }
   export OPENSSL_DIR="$PY_DEPS_PREFIX"
-  # build_openssl.py 的 cffi 供给三保险（第三/四轮实锤：shell 硬校验过而 build.rs 内
-  # Command::new(PYO3_PYTHON) 仍 ModuleNotFoundError——env 传递链有未知断点）：
-  # ① PYO3_PYTHON 绝对路径；② 系统 /usr/bin/python3 也装 cffi（覆盖默认解析）；
-  # ③ PYTHONPATH 钉含 cffi 的 site 目录（覆盖任意同族解释器）
-  export PYO3_PYTHON="$(command -v python3)"
-  "$PYO3_PYTHON" -c 'import cffi' \
-    || { echo "错误：PYO3_PYTHON（$PYO3_PYTHON）缺 cffi——build_openssl.py 必红。" >&2; exit 1; }
-  CFFI_SITE="$("$PYO3_PYTHON" -c 'import cffi, os; print(os.path.dirname(os.path.dirname(cffi.__file__)))')"
-  export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}$CFFI_SITE"
-  echo "  cffi 供给：PYO3_PYTHON=$PYO3_PYTHON | site=$CFFI_SITE"
-  /usr/bin/python3 -m pip install --quiet --break-system-packages 'cffi>=2.0' 2>/dev/null \
-    || sudo /usr/bin/python3 -m pip install --quiet --break-system-packages 'cffi>=2.0' \
-    || echo "  !! /usr/bin/python3 装 cffi 未成（诊断线索）"
+  # build_openssl.py 的 cffi 供给（第五轮 version mismatch 实锤定案：build.rs 的
+  # Command 跑的是系统 /usr/bin/python3【3.12】——PYO3_PYTHON env 传不进 build script，
+  # 且 PYTHONPATH 喂 3.13 的 cffi py 部分给 3.12 会与系统 _cffi_backend 1.16 错位）。
+  # 修 = ① 给 3.12 装配套 cffi>=2.0（py 部分 + cp312 _cffi_backend 同源同版）；
+  #       ② 源码树 .cargo/config.toml [env] 硬钉 PYO3_PYTHON（cargo 官方注入通道）；
+  #       ③ PYTHONPATH 不设（3.13/3.12 混喂 = 错位源，撤）
+  /usr/bin/python3 -m pip install --quiet --break-system-packages --force-reinstall \
+      'cffi>=2.0' 'setuptools' \
+    || sudo /usr/bin/python3 -m pip install --quiet --break-system-packages \
+      --force-reinstall 'cffi>=2.0' 'setuptools' \
+    || { echo "错误：/usr/bin/python3 装 cffi 未成——build.rs 用它必红。" >&2; exit 1; }
+  /usr/bin/python3 -c 'import cffi; from importlib.metadata import version; \
+assert version("cffi") == cffi.__version__, "cffi 双版本残留"; \
+print("  3.12 cffi 就绪", cffi.__version__)' \
+    || { echo "错误：/usr/bin/python3 的 cffi 版本错位（dist-packages 1.16 残留）。" >&2; exit 1; }
+  mkdir -p "$WORK/cryptography-$V_cryptography/.cargo"
+  printf '[env]\nPYO3_PYTHON = "%s"\n' "$(command -v python3)" \
+    > "$WORK/cryptography-$V_cryptography/.cargo/config.toml"
+  echo "  [env] 已钉：PYO3_PYTHON = $(command -v python3)"
   maturin_pkg cryptography "$V_cryptography"
   # AESGCM 往返（libcrypto 链 + cffi 生成面同验；避免拉 ssl 深链）
   "$RUN_PY" -c "
