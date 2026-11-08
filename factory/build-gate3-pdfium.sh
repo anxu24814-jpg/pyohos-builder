@@ -184,17 +184,14 @@ EOF
   done
   echo "  链接供给已补：$(ls "$CLANG_RES/aarch64-linux-ohos/" | tr '\n' ' ')"
   # pipefail 实锤：grep|head 被提前关管道（SIGPIPE）即杀脚本（第四轮 0.7s 静默 exit，
-  # ninja 根本没跑）——|| true 包裹
-  UW_FILES=$( { grep -rln -- '-l:libunwind.a' "$PDF_SRC/build" 2>/dev/null || true; } | head -3)
-  echo "  libunwind 注入点：${UW_FILES:-未找到}"
-  for f in $UW_FILES; do
-    sed -i 's/"-l:libunwind.a", *//g; s/, *"-l:libunwind.a"//g; s/"-l:libunwind.a"//g' "$f"
-  done
-  if grep -rq -- '-l:libunwind.a' "$PDF_SRC/build" 2>/dev/null; then
-    echo "  !! libunwind 引用仍有残留（形态变了，见上注入点文件）"
-  else
-    echo "  libunwind 引用已清"
-  fi
+  # ninja 根本没跑）——|| true 包裹；且注入点不在 build/ 下（第五轮「未找到」而链接仍要
+  # 它）——改供给法：SDK llvm/lib/aarch64-linux-ohos/ 有现成 libunwind.a，拷进
+  # sysroot 标准搜索位（ld -l: 命中），grep 降级为纯定位信息
+  cp -f "$SDK_NATIVE/llvm/lib/aarch64-linux-ohos/libunwind.a" \
+    "$SYSROOT/usr/lib/aarch64-linux-ohos/libunwind.a"
+  echo "  libunwind.a 已供给（SDK → sysroot lib）"
+  UW_FILES=$( { grep -rln -- '-l:libunwind.a' "$PDF_SRC" 2>/dev/null --exclude-dir=out || true; } | head -3)
+  echo "  libunwind 引用位（定位信息）：${UW_FILES:-未找到}"
 
   ( cd "$PDF_SRC" && ninja -C "$PDF_OUT" pdfium ) \
     || { mark pdfium "红（ninja 失败，日志见上）"; exit 1; }
