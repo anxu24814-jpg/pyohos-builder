@@ -663,6 +663,10 @@ import sys
 ok = []
 def check(name, fn):
     r = fn()
+    # 旧版只把调用次数计入 ok：函数返回 False/None/0 也照样 print("ok") 并凑满 17 项
+    # ——恒绿判据（本轮自检发现）。逐项判真值，假值立即抛 → qemu 进程非零 → exit 4
+    if not r:
+        raise AssertionError(name + " 返回假值：" + repr(r))
     ok.append((name, r))
     print("ok", name, r)
 def _stdlib_exts():
@@ -709,6 +713,8 @@ check("contourpy", lambda: __import__("contourpy").__version__)
 check("matplotlib-agg", lambda: _mpl_png())
 check("lxml-xpath", lambda: _lxml_etree().__version__)
 check("lxml-parse", lambda: _lxml_etree().fromstring(b"<a x='1'/>").get("x"))
+if len(ok) != 17:
+    raise SystemExit("SMOKE-FAIL 仅 %d 项通过，应有 17 项" % len(ok))
 print("SMOKE-OK", len(ok), "items passed")
 EOF
   ( cd "$VWORK" && ./run-verify.sh smoke_all.py ) \
