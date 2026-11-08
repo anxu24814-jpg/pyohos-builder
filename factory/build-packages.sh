@@ -136,6 +136,9 @@ int backtrace(void **b, int s) { (void) b; (void) s; return 0; }
 char **backtrace_symbols(void *const *b, int s) { (void) b; (void) s; return NULL; }
 void backtrace_symbols_fd(void *const *b, int s, int fd) { (void) b; (void) s; (void) fd; }
 int __fd_chk(int fd) { return fd; }
+/* OHOS musl fortify 加固符号族（真机 libc 供给；qemu 冒烟差集兜底——门 3 pypdfium2
+   装载实锤 __strlen_chk。原型手写不带系统头，防 string.h 宏改名） */
+char *__strlen_chk(const char *s, size_t n) { size_t l = 0; while (l < n && s[l]) l++; return (char *)(s + l); }
 EOF
     "$CLANG" --sysroot="$SYSROOT" -shared -fPIC -O1 -o "$TGT_LIBS/libexecinfo_stub.so" "$WORK/execinfo-stub.c"
   fi
