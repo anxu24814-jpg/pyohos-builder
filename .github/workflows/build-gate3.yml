@@ -1,14 +1,20 @@
-# 门 3 Rust 三件 workflow（2026-11-08）：cryptography 50.0.2 / pydantic-core 2.50.4 /
-# rpds-py 2026.9.1 交叉编译到 OHOS aarch64（aarch64-unknown-linux-ohos，Tier 2）。
-# PDFium 域另立 job（depot_tools 构建重、域独立），本 workflow 先行 Rust 域。
+# 门 3 workflow（2026-11-08）：Rust 三件 + PDFium 域两 job 独立并行。
+#   · rust-trio：cryptography 50.0.2 / pydantic-core 2.50.4 / rpds-py 2026.9.1 交叉编译
+#     到 OHOS aarch64（aarch64-unknown-linux-ohos，Tier 2）
+#   · pdfium：PDFium C++ 库自交叉编译（bblanchon 参数 + triple patch）+ pypdfium2
+#     5.14.0 纯 Python 绑定打包（.so 与 bindings 同目录进 extras 的域特例）
 #
-# 前置：build-gate2 的 ohos-py-deps-prefix 与 cpython-ohos-3.13.18-aarch64-g2（同门 2）。
+# 前置：build-gate2 的 cpython-ohos-3.13.18-aarch64-g2（两 job 同拉；rust-trio 另拉
+# ohos-py-deps-prefix 供 OPENSSL_DIR）。
 #
-# ── job 结构（单 job；门 2 rootfs + cffi 两段自举 qemu 探针环境后跑 gate3-rust 各段）──
+# ── job 结构（两 job 并行，各自 85 分钟限）──────────────────────────────────
 #   rust-trio：SDK + gate2 产物 + rustup target → rootfs + cffi（门 2 脚本两段，
 #              cffi 为 cryptography 的 import 链前置）→ rust-setup / rpds /
 #              pydantic-core / cryptography / verify3（gate3-rust.sh 逐段）
 #              → artifact gate3-rust（gate3-out 三层树 + pkg-status）
+#   pdfium   ：SDK + gate2 g2 + 源码树缓存 → rootfs → pdfium-sync / pdfium-build /
+#              pypdfium2 / verify-pdf（gate3-pdfium.sh 逐段）
+#              → artifact gate3-pdfium（gate3-out 三层树 + pkg-status）
 name: build-gate3
 
 on:
@@ -125,6 +131,107 @@ jobs:
           name: gate3-rust
           path: |
             ${{ runner.temp }}/pack/gate3-rust.tar.gz
+            ${{ runner.temp }}/pack/pkg-status.txt
+          retention-days: 30
+          if-no-files-found: error
+
+  # ── PDFium 域（与 rust-trio 独立并行；源码树缓存控时长，首轮 sync 无缓存最重）──
+  pdfium:
+    runs-on: ubuntu-latest
+    timeout-minutes: 85
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup host python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install host build tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static ninja-build unzip pkg-config file
+
+      - name: Restore OHOS SDK cache
+        id: sdk
+        uses: actions/cache@v4
+        with:
+          path: ~/ohos-sdk-native
+          key: ohos-sdk-native-${{ env.SDK_FILENAME }}
+
+      - name: Download and extract OHOS SDK (linux native)
+        if: steps.sdk.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          cd "$RUNNER_TEMP"
+          curl -C - --retry 3 --retry-delay 10 -o "$SDK_FILENAME" "$SDK_URL"
+          echo "$SDK_SHA256  $SDK_FILENAME" | sha256sum -c -
+          tar -xzf "$SDK_FILENAME"
+          rm -f "$SDK_FILENAME"
+          cd ohos-sdk/linux
+          unzip -q native-linux-x64-*.zip
+          rm -f ./*.zip
+          mv native "$HOME/ohos-sdk-native"
+          cd "$RUNNER_TEMP" && rm -rf ohos-sdk
+
+      - name: Restore pdfium source cache
+        id: pdfsrc
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/ohos-py-pkgs/depot_tools
+            ~/ohos-py-pkgs/pdfium
+          key: pdfium-src-chromium-8138
+
+      - name: Fetch latest gate2 artifacts
+        run: |
+          set -euxo pipefail
+          G2_RUN=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow build-gate2 --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          [ -n "$G2_RUN" ] || { echo "无成功的 build-gate2 run——先跑 build-gate2"; exit 1; }
+          gh run download "$G2_RUN" --repo "$GITHUB_REPOSITORY" \
+            --name cpython-ohos-3.13.18-aarch64-g2 --dir "$RUNNER_TEMP/g2"
+          mkdir -p "$RUNNER_TEMP/g2x"
+          tar -xzf "$RUNNER_TEMP/g2/cpython-ohos-3.13.18-aarch64-g2.tar.gz" -C "$RUNNER_TEMP/g2x"
+          ls "$RUNNER_TEMP/g2x"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Bootstrap qemu probe env (gate2 rootfs)
+        run: |
+          set -euxo pipefail
+          export SDK_NATIVE="$HOME/ohos-sdk-native" \
+                 G2_DIR="$RUNNER_TEMP/g2x" \
+                 OUT_DIR="$GITHUB_WORKSPACE/pkg-out" \
+                 WORK="$HOME/ohos-py-pkgs"
+          STAGE=rootfs bash factory/build-packages.sh
+
+      - name: Build gate3 pdfium
+        run: |
+          set -euxo pipefail
+          export SDK_NATIVE="$HOME/ohos-sdk-native" \
+                 G2_DIR="$RUNNER_TEMP/g2x" \
+                 OUT_DIR="$GITHUB_WORKSPACE/gate3-out" \
+                 WORK="$HOME/ohos-py-pkgs"
+          for stage in pdfium-sync pdfium-build pypdfium2 verify-pdf; do
+            STAGE="$stage" bash factory/build-gate3-pdfium.sh
+          done
+
+      - name: Pack gate3 pdfium artifacts
+        if: always()
+        run: |
+          set -euxo pipefail
+          [ -d "$GITHUB_WORKSPACE/gate3-out/extras/pypdfium2_raw" ] || { echo "gate3-out pypdfium2_raw 不存在，跳过打包"; exit 0; }
+          mkdir -p "$RUNNER_TEMP/pack"
+          cp -f "$HOME/ohos-py-pkgs/pkg-status.txt" "$RUNNER_TEMP/pack/" || true
+          tar -czf "$RUNNER_TEMP/pack/gate3-pdfium.tar.gz" -C "$GITHUB_WORKSPACE" gate3-out
+          ls -l "$RUNNER_TEMP/pack" | awk '{printf "%12d B  %s\n", $5, $9}'
+
+      - name: Upload gate3 pdfium artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate3-pdfium
+          path: |
+            ${{ runner.temp }}/pack/gate3-pdfium.tar.gz
             ${{ runner.temp }}/pack/pkg-status.txt
           retention-days: 30
           if-no-files-found: error
