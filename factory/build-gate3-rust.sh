@@ -24,6 +24,7 @@ set -euo pipefail
 
 # ---- 版本冻结副本（单源 = scripts/python-runtime/manifest.json，2026-11-06 冻结）----
 V_cryptography="50.0.2"    V_pydantic_core="2.50.4"    V_rpds_py="2026.9.1"
+V_typing_extensions="4.16.0"   # pydantic_core 顶层 import；真机侧在 site-packages.zip
 RUST_TARGET="aarch64-unknown-linux-ohos"   # rustc/rustup 侧三元组（带 unknown）
 OHOS_TRIPLE="aarch64-linux-ohos"           # clang 侧三元组（不带）
 
@@ -115,6 +116,22 @@ if want rust-setup; then
   # 宿主侧 cryptography 构建依赖：cffi 生成步在宿主 Python 跑（emit_c_code 出 _openssl.c）
   python3 -c "import cffi; print('  host cffi', cffi.__version__)" \
     || { echo "错误：宿主缺 cffi（cryptography cffi 生成步需要）。" >&2; exit 1; }
+
+  # TGT_SITE 补 typing_extensions（pydantic_core __init__ 顶层 import；真机侧该包在
+  # site-packages.zip，本 job 的 qemu TGT_SITE 没有——第二轮实锤 ModuleNotFoundError）
+  if [ ! -d "$TGT_SITE/typing_extensions" ]; then
+    rm -rf "$WORK/te-whl"; mkdir -p "$WORK/te-whl"
+    python3 -m pip download "typing-extensions==$V_typing_extensions" --no-deps \
+      --only-binary=:all: --python-version 3.13 --implementation py --abi none \
+      --platform any -d "$WORK/te-whl" --quiet
+    python3 - "$WORK/te-whl" "$TGT_SITE" <<'PY'
+import sys, zipfile, glob
+w = glob.glob(sys.argv[1] + '/*.whl')[0]
+with zipfile.ZipFile(w) as z:
+    z.extractall(sys.argv[2])
+print('  typing_extensions → TGT_SITE')
+PY
+  fi
   mark rust-setup "OK（target $RUST_TARGET + 内省目录就绪）"
 fi
 
