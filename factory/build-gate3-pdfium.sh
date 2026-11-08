@@ -235,8 +235,11 @@ import json, os, sys
 vj = os.path.join(sys.argv[1], 'pypdfium2_raw', 'version.json')
 if os.path.exists(vj):
     v = json.load(open(vj)).get('V_PDFIUM', '')
-    tag = "" if v == sys.argv[2] else "  !! 错位警示"
-    print(f"  wheel V_PDFIUM={v} | 构建分支={sys.argv[2]}{tag}")
+    if v:
+        tag = "" if v == sys.argv[2] else "  !! 错位警示"
+        print(f"  wheel V_PDFIUM={v} | 构建分支={sys.argv[2]}{tag}")
+    else:
+        print("  !! version.json 无 V_PDFIUM 键（跳过比对）")
 else:
     print("  !! wheel 无 version.json（跳过比对）")
 PY
