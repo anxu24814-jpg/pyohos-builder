@@ -183,7 +183,9 @@ EOF
     cp -f "$SDK_RES/aarch64-linux-ohos/$src_f" "$SYSROOT/usr/lib/aarch64-linux-ohos/$base.o"
   done
   echo "  链接供给已补：$(ls "$CLANG_RES/aarch64-linux-ohos/" | tr '\n' ' ')"
-  UW_FILES=$(grep -rln -- '-l:libunwind.a' "$PDF_SRC/build" 2>/dev/null | head -3)
+  # pipefail 实锤：grep|head 被提前关管道（SIGPIPE）即杀脚本（第四轮 0.7s 静默 exit，
+  # ninja 根本没跑）——|| true 包裹
+  UW_FILES=$( { grep -rln -- '-l:libunwind.a' "$PDF_SRC/build" 2>/dev/null || true; } | head -3)
   echo "  libunwind 注入点：${UW_FILES:-未找到}"
   for f in $UW_FILES; do
     sed -i 's/"-l:libunwind.a", *//g; s/, *"-l:libunwind.a"//g; s/"-l:libunwind.a"//g' "$f"
