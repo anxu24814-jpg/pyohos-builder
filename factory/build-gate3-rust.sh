@@ -254,10 +254,13 @@ if want cryptography; then
 assert version("cffi") == cffi.__version__, "cffi 双版本残留"; \
 print("  3.12 cffi 就绪", cffi.__version__)' \
     || { echo "错误：/usr/bin/python3 的 cffi 版本错位（dist-packages 1.16 残留）。" >&2; exit 1; }
-  mkdir -p "$WORK/cryptography-$V_cryptography/.cargo"
+  # .cargo/config.toml 必须在 fetch_sdist 之后写：预建目录会让 fetch_sdist 的
+  # [ ! -d ] 判据误判「已解包」而跳过下载（第六轮 Can't find Cargo.toml 实锤）
+  CRYPTO_DIR="$(fetch_sdist cryptography "$V_cryptography")"
+  mkdir -p "$CRYPTO_DIR/.cargo"
   printf '[env]\nPYO3_PYTHON = "%s"\n' "$(command -v python3)" \
-    > "$WORK/cryptography-$V_cryptography/.cargo/config.toml"
-  echo "  [env] 已钉：PYO3_PYTHON = $(command -v python3)"
+    > "$CRYPTO_DIR/.cargo/config.toml"
+  echo "  [env] 已钉：PYO3_PYTHON = $(command -v python3)（$CRYPTO_DIR/.cargo/config.toml）"
   maturin_pkg cryptography "$V_cryptography"
   # AESGCM 往返（libcrypto 链 + cffi 生成面同验；避免拉 ssl 深链）
   "$RUN_PY" -c "
