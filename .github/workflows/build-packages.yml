@@ -8,7 +8,7 @@
 #                → artifact pkg-tree-core（三层产物树 + 目标侧 site 树）
 #   pkgs-heavy ：rootfs 重建 + 融合 core 的目标侧 site → contourpy/pandas/matplotlib
 #                → bundle（双 zip 汇总 + sitecustomize）→ verify（qemu 按真机布局冒烟）
-#                → artifact pkg-final（site-packages.zip + extras.zip + libs.tar.gz）
+#                → artifact pkg-final（site-packages.zip + extras.zip + pkg-libs.tar.gz）
 name: build-packages
 
 on:
