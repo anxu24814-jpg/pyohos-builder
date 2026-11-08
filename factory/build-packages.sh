@@ -131,14 +131,52 @@ if want rootfs; then
   # 符号可解析，不触发调用语义
   if [ ! -f "$TGT_LIBS/libexecinfo_stub.so" ]; then
     cat > "$WORK/execinfo-stub.c" <<'EOF'
+#define _GNU_SOURCE
 #include <stddef.h>
+#include <string.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+/* qemu 差集存根（Alpine musl 与 OHOS musl 的符号差集，真机 libc 全供给，仅冒烟兜底）：
+   backtrace 族 + __fd_chk + OHOS fortify 加固符号族（签名 = sysroot fortify 头逐条
+   实读；第八轮起 __strlen_chk/__open_chk 逐个冒，一次写齐 27 件——转发丢检查参数，
+   转发调用加括号禁 fortify 宏再展开成自递归；ppoll/strnlen/memrchr 手写原型） */
+int ppoll(struct pollfd *, nfds_t, const struct timespec *, const sigset_t *);
+size_t strnlen(const char *, size_t);
+void *memrchr(const void *, int, size_t);
 int backtrace(void **b, int s) { (void) b; (void) s; return 0; }
 char **backtrace_symbols(void *const *b, int s) { (void) b; (void) s; return NULL; }
 void backtrace_symbols_fd(void *const *b, int s, int fd) { (void) b; (void) s; (void) fd; }
 int __fd_chk(int fd) { return fd; }
-/* OHOS musl fortify 加固符号族（真机 libc 供给；qemu 冒烟差集兜底——门 3 pypdfium2
-   装载实锤 __strlen_chk。原型手写不带系统头，防 string.h 宏改名） */
-char *__strlen_chk(const char *s, size_t n) { size_t l = 0; while (l < n && s[l]) l++; return (char *)(s + l); }
+int __open_chk(const char *p, int f) { return (open)(p, f); }
+int __openat_chk(int d, const char *p, int f) { return (openat)(d, p, f); }
+int __poll_chk(struct pollfd *f, nfds_t n, int t, size_t bos) { (void)bos; return (poll)(f, n, t); }
+int __ppoll_chk(struct pollfd *f, nfds_t n, const struct timespec *ts, const sigset_t *sm, size_t bos) { (void)bos; return ppoll(f, n, ts, sm); }
+mode_t __umask_chk(mode_t m) { return (umask)(m); }
+char *__fgets_chk(char *b, int s, FILE *fp, size_t bos) { (void)bos; return (fgets)(b, s, fp); }
+char *__getcwd_chk(char *b, size_t s, size_t bos) { (void)bos; return (getcwd)(b, s); }
+size_t __fread_chk(void *p, size_t sz, size_t n, FILE *fp, size_t bos) { (void)bos; return (fread)(p, sz, n, fp); }
+size_t __fwrite_chk(const void *p, size_t sz, size_t n, FILE *fp, size_t bos) { (void)bos; return (fwrite)(p, sz, n, fp); }
+ssize_t __read_chk(int fd, void *b, size_t n, size_t bos) { (void)bos; return (read)(fd, b, n); }
+ssize_t __write_chk(int fd, const void *b, size_t n, size_t bos) { (void)bos; return (write)(fd, b, n); }
+ssize_t __pread_chk(int fd, void *b, size_t n, off_t o, size_t bos) { (void)bos; return (pread)(fd, b, n, o); }
+ssize_t __pwrite_chk(int fd, const void *b, size_t n, off_t o, size_t bos) { (void)bos; return (pwrite)(fd, b, n, o); }
+ssize_t __recv_chk(int fd, void *b, size_t n, size_t bos, int f) { (void)bos; return (recv)(fd, b, n, f); }
+ssize_t __recvfrom_chk(int fd, void *b, size_t n, size_t bos, int f, struct sockaddr *a, socklen_t *l) { (void)bos; return (recvfrom)(fd, b, n, f, a, l); }
+ssize_t __send_chk(int fd, const void *b, size_t n, size_t bos, int f) { (void)bos; return (send)(fd, b, n, f); }
+ssize_t __sendto_chk(int fd, const void *b, size_t n, size_t bos, int f, const struct sockaddr *a, socklen_t l) { (void)bos; return (sendto)(fd, b, n, f, a, l); }
+ssize_t __readlink_chk(const char *p, char *b, size_t s, size_t bos) { (void)bos; return (readlink)(p, b, s); }
+ssize_t __readlinkat_chk(int d, const char *p, char *b, size_t s, size_t bos) { (void)bos; return (readlinkat)(d, p, b, s); }
+char *__strchr_chk(const char *p, int c, size_t bos) { (void)bos; return (strchr)(p, c); }
+char *__strrchr_chk(const char *p, int c, size_t bos) { (void)bos; return (strrchr)(p, c); }
+size_t __strlcat_chk(char *d, const char *s, size_t n, size_t bos) { (void)bos; return (strlcat)(d, s, n); }
+size_t __strlcpy_chk(char *d, const char *s, size_t n, size_t bos) { (void)bos; return (strlcpy)(d, s, n); }
+size_t __strlen_chk(const char *s, size_t n) { return strnlen(s, n); }
+void *__memchr_chk(const void *s, int c, size_t n, size_t bos) { (void)bos; return (memchr)(s, c, n); }
+void *__memrchr_chk(const void *s, int c, size_t n, size_t bos) { (void)bos; return memrchr(s, c, n); }
 EOF
     "$CLANG" --sysroot="$SYSROOT" -shared -fPIC -O1 -o "$TGT_LIBS/libexecinfo_stub.so" "$WORK/execinfo-stub.c"
   fi
