@@ -122,7 +122,21 @@ if want pdfium-sync; then
         fi
       fi
     done )
-  mark pdfium-sync "OK（pdfium 源 + triple patch 就绪）"
+
+  # libc++ rune 表注入（首轮实锤：OHOS musl 无 glibc/BSD ctype 位掩码，__locale 的
+  # alpha/digit/punct/mask 全 undeclared + 提示 define _LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE
+  # ——libc++ 内置默认 rune 表开关，经 -nostdinc++ 锚点随 libc++ flags 全局带上）
+  CXX_GN="$PDF_SRC/build/config/c++/BUILD.gn"
+  [ -f "$CXX_GN" ] || { echo "错误：找不到 $CXX_GN。" >&2; exit 1; }
+  if ! grep -q '_LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE' "$CXX_GN"; then
+    echo "  注入锚点上下文（自证）："
+    grep -n -- '-nostdinc++' "$CXX_GN" | head -3
+    sed -i 's/"-nostdinc++",/"-nostdinc++", "-D_LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE",/' "$CXX_GN"
+    grep -q '_LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE' "$CXX_GN" \
+      || { echo "错误：rune 表宏注入失败（-nostdinc++ 锚点形态变了）。" >&2; exit 1; }
+    echo "  rune 表宏已注入 $(grep -c '_LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE' "$CXX_GN") 处"
+  fi
+  mark pdfium-sync "OK（pdfium 源 + triple patch + rune 表宏就绪）"
 fi
 
 # ================================================================
@@ -182,6 +196,18 @@ with zipfile.ZipFile(w) as z:
 PY
   # 换二进制：自编 libpdfium.so 落 pypdfium2_raw/（与 bindings.py 同目录 = 其 ctypes
   # 相对加载位）；其余原样。整包树进 extras（含 .so——本域特例）与 TGT_SITE。
+  # 另读 wheel 自带 version.json 的 V_PDFIUM 与构建分支比对（错位 = bindings 面与库
+  # API 漂移风险，只警示不阻断——闸②③真机验兜底）
+  python3 - "$WORK/pdfium-unpack" "$PDFIUM_REV" <<'PY' || true
+import json, os, sys
+vj = os.path.join(sys.argv[1], 'pypdfium2_raw', 'version.json')
+if os.path.exists(vj):
+    v = json.load(open(vj)).get('V_PDFIUM', '')
+    tag = "" if v == sys.argv[2] else "  !! 错位警示"
+    print(f"  wheel V_PDFIUM={v} | 构建分支={sys.argv[2]}{tag}")
+else:
+    print("  !! wheel 无 version.json（跳过比对）")
+PY
   cp -f "$PDF_OUT/libpdfium.so" "$WORK/pdfium-unpack/pypdfium2_raw/libpdfium.so"
   python3 - "$WORK/pdfium-unpack" "$OUT_DIR" "$TGT_SITE" <<'PY'
 import os, shutil, sys
