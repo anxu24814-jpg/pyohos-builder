@@ -236,7 +236,12 @@ if want cryptography; then
   echo "== [cryptography] cryptography $V_cryptography"
   [ -d "$TGT_SITE/cffi" ] || { echo "错误：TGT_SITE 缺 cffi——先跑 build-packages.sh 的 STAGE=cffi。" >&2; exit 1; }
   export OPENSSL_DIR="$PY_DEPS_PREFIX"
-  export PYO3_PYTHON=python3
+  # PYO3_PYTHON 绝对路径（第三轮实锤：build.rs 以 Command::new(PYO3_PYTHON) 跑
+  # build_openssl.py 时 import cffi 失败而 shell 探针同一命令有——解析环境不一致，
+  # 绝对路径消除歧义 + 硬校验兜底）
+  export PYO3_PYTHON="$(command -v python3)"
+  "$PYO3_PYTHON" -c 'import cffi' \
+    || { echo "错误：PYO3_PYTHON（$PYO3_PYTHON）缺 cffi——build_openssl.py 必红。" >&2; exit 1; }
   maturin_pkg cryptography "$V_cryptography"
   # AESGCM 往返（libcrypto 链 + cffi 生成面同验；避免拉 ssl 深链）
   "$RUN_PY" -c "
