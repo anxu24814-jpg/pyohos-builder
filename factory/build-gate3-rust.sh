@@ -198,7 +198,7 @@ PY
 if want rpds; then
   echo "== [rpds] rpds-py $V_rpds_py"
   maturin_pkg rpds-py "$V_rpds_py"
-  "$RUN_PY" -c "import rpds; m = rpds.HashTrieMap(a=1); assert m['a'] == 1; print('probe-ok rpds', rpds.__version__)" \
+  "$RUN_PY" -c "import rpds; from importlib.metadata import version; m = rpds.HashTrieMap(a=1); assert m['a'] == 1; print('probe-ok rpds', version('rpds-py'))" \
     || { mark rpds "红（qemu 探针失败）"; exit 1; }
 fi
 
@@ -208,7 +208,7 @@ fi
 if want pydantic-core; then
   echo "== [pydantic-core] pydantic-core $V_pydantic_core"
   maturin_pkg pydantic-core "$V_pydantic_core"
-  "$RUN_PY" -c "import pydantic_core; print('probe-ok pydantic_core', pydantic_core.__version__)" \
+  "$RUN_PY" -c "import pydantic_core; from importlib.metadata import version; print('probe-ok pydantic_core', version('pydantic-core'))" \
     || { mark pydantic-core "红（qemu 探针失败）"; exit 1; }
 fi
 
@@ -225,10 +225,11 @@ if want cryptography; then
   "$RUN_PY" -c "
 import os
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from importlib.metadata import version
 k = AESGCM.generate_key(bit_length=256)
 ct = AESGCM(k).encrypt(b'n', b'smoke', b'ad')
 assert AESGCM(k).decrypt(b'n', ct, b'ad') == b'smoke'
-import cryptography; print('probe-ok cryptography', cryptography.__version__)" \
+print('probe-ok cryptography', version('cryptography'))" \
     || { mark cryptography "红（qemu 探针失败）"; exit 1; }
 fi
 
@@ -240,12 +241,13 @@ if want verify3; then
   echo "== [verify3] Rust 三件冒烟（TGT_SITE 布局）"
   "$RUN_PY" - <<'PY' || { echo "错误：verify3 冒烟失败。" >&2; exit 4; }
 import rpds, pydantic_core
+from importlib.metadata import version
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 assert rpds.HashTrieMap(a=1)['a'] == 1
 k = AESGCM.generate_key(bit_length=256)
 ct = AESGCM(k).encrypt(b'n', b'smoke', b'ad')
 assert AESGCM(k).decrypt(b'n', ct, b'ad') == b'smoke'
-print("SMOKE-OK gate3-rust 3 items:", rpds.__version__, pydantic_core.__version__)
+print("SMOKE-OK gate3-rust 3 items:", version('rpds-py'), version('pydantic-core'))
 PY
   mark verify3 "OK（3 items passed）"
 fi
