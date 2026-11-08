@@ -211,6 +211,8 @@ fi
 if want pypdfium2; then
   echo "== [pypdfium2] $V_pypdfium2 打包（bindings 换自编 PDFium）"
   [ -f "$PDF_OUT/libpdfium.so" ] || { echo "错误：先跑 STAGE=pdfium-build。" >&2; exit 1; }
+  # 逐段跑时 sync 段的 PDFIUM_REV 不在本进程（第六轮 unbound variable 实锤）——兜底
+  PDFIUM_REV="${PDFIUM_REV:-$PDFIUM_BRANCH_FALLBACK}"
   rm -rf "$WORK/pdfium-whl"; mkdir -p "$WORK/pdfium-whl"
   # 取本机平台 wheel（bindings.py 与 py 树跨平台同构；内嵌 libpdfium 二进制弃用换自编）
   python3 -m pip download "pypdfium2==$V_pypdfium2" --no-deps --only-binary=:all: \
