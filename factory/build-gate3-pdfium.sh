@@ -163,6 +163,37 @@ use_glib = false
 target_sysroot = "$SYSROOT"
 EOF
   ( cd "$PDF_SRC" && gn gen "$PDF_OUT" ) || { mark pdfium "红（gn gen 失败）"; exit 1; }
+
+  # 链接供给修补（第三轮实锤：1172 编译全过、SOLINK 三类缺件——pdfium 自带 clang 24
+  # 按 OHOS triple 找 builtins 无该目录名 + glibc 布局假设找 crtbeginS/crtendS + 静态
+  # libc++ 链带 -l:libunwind.a）。SDK clang 15 resource lib 有全套 aarch64-linux-ohos
+  # 供给，拷贝顶名；unwind 引用定位后删除（undefined 再回看）。
+  CLANG_RES=$(ls -d "$PDF_SRC"/third_party/llvm-build/Release+Asserts/lib/clang/*/lib | head -1)
+  SDK_RES=$(ls -d "$SDK_NATIVE"/llvm/lib/clang/*/lib | head -1)
+  [ -d "$SDK_RES/aarch64-linux-ohos" ] || { echo "错误：SDK resource lib 缺 aarch64-linux-ohos。" >&2; exit 1; }
+  mkdir -p "$CLANG_RES/aarch64-linux-ohos" "$SYSROOT/usr/lib/aarch64-linux-ohos"
+  for f in libclang_rt.builtins.a; do
+    cp -f "$SDK_RES/aarch64-linux-ohos/$f" "$CLANG_RES/aarch64-linux-ohos/$f"
+  done
+  # CRT 顶名（SDK 的 clang_rt.crtbegin.o / crtend.o〔无 lib 前缀〕→ glibc 场景四个名）
+  for base in crtbeginS crtbegin crtendS crtend; do
+    src_f=clang_rt.crtbegin.o
+    case "$base" in crtend*) src_f=clang_rt.crtend.o ;; esac
+    cp -f "$SDK_RES/aarch64-linux-ohos/$src_f" "$CLANG_RES/aarch64-linux-ohos/$base.o"
+    cp -f "$SDK_RES/aarch64-linux-ohos/$src_f" "$SYSROOT/usr/lib/aarch64-linux-ohos/$base.o"
+  done
+  echo "  链接供给已补：$(ls "$CLANG_RES/aarch64-linux-ohos/" | tr '\n' ' ')"
+  UW_FILES=$(grep -rln -- '-l:libunwind.a' "$PDF_SRC/build" 2>/dev/null | head -3)
+  echo "  libunwind 注入点：${UW_FILES:-未找到}"
+  for f in $UW_FILES; do
+    sed -i 's/"-l:libunwind.a", *//g; s/, *"-l:libunwind.a"//g; s/"-l:libunwind.a"//g' "$f"
+  done
+  if grep -rq -- '-l:libunwind.a' "$PDF_SRC/build" 2>/dev/null; then
+    echo "  !! libunwind 引用仍有残留（形态变了，见上注入点文件）"
+  else
+    echo "  libunwind 引用已清"
+  fi
+
   ( cd "$PDF_SRC" && ninja -C "$PDF_OUT" pdfium ) \
     || { mark pdfium "红（ninja 失败，日志见上）"; exit 1; }
   ls -l "$PDF_OUT/libpdfium.so" >/dev/null \
