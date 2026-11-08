@@ -277,8 +277,9 @@ import pypdfium2 as pdfium
 pdf = pdfium.PdfDocument.new()
 page = pdf.new_page(200, 100)
 assert len(pdf) == 1
-ver = getattr(pdfium, "V_PYPDFIUM2", None) or pdfium.version.V_PYPDFIUM2
-print("SMOKE-OK gate3-pdfium: pages =", len(pdf), "| pypdfium2", ver)
+# 版本证据在 dist-info 与 wheel 文件名，此处不打印（5.14.0 的 version 模块无
+# V_PYPDFIUM2 顶层属性——第十一轮探针自身缺陷实锤）
+print("SMOKE-OK gate3-pdfium: pages =", len(pdf))
 PY
   mark verify-pdf "OK（new doc + new page）"
 fi
