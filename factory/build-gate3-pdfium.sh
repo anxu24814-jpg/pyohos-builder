@@ -247,15 +247,17 @@ PY
   python3 - "$WORK/pdfium-unpack" "$OUT_DIR" "$TGT_SITE" <<'PY'
 import os, shutil, sys
 src, out, tgt = sys.argv[1], sys.argv[2], sys.argv[3]
-for top in ('pypdfium2', 'pypdfium2_raw'):
+# pypdfium2_cfg = _library_scope 运行时 import DEBUG_AUTOCLOSE 的硬依赖（第十轮实锤
+# ModuleNotFoundError）；pypdfium2_cli 无 import 引用不带。.so 只随 pypdfium2_raw。
+for top in ('pypdfium2', 'pypdfium2_raw', 'pypdfium2_cfg'):
     s = os.path.join(src, top)
     if not os.path.isdir(s):
-        continue
+        print('错误：wheel 解包缺', top); sys.exit(1)
     d1 = os.path.join(out, 'extras', top)
     d2 = os.path.join(tgt, top)
     shutil.rmtree(d1, ignore_errors=True); shutil.copytree(s, d1, ignore=shutil.ignore_patterns('__pycache__'))
     shutil.rmtree(d2, ignore_errors=True); shutil.copytree(s, d2, ignore=shutil.ignore_patterns('__pycache__'))
-    print('已落位', top, '→ extras + TGT_SITE（.so 随包，加载路径同目录特例）')
+    print('已落位', top, '→ extras + TGT_SITE')
 PY
   # dist-info 同步（importlib.metadata 面）
   if [ -d "$WORK/pdfium-unpack/pypdfium2-$V_pypdfium2.dist-info" ]; then
