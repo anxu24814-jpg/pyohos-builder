@@ -133,6 +133,7 @@ if want rootfs; then
     cat > "$WORK/execinfo-stub.c" <<'EOF'
 #define _GNU_SOURCE
 #include <stddef.h>
+#include <stdarg.h>
 #include <string.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -177,6 +178,30 @@ size_t __strlcpy_chk(char *d, const char *s, size_t n, size_t bos) { (void)bos; 
 size_t __strlen_chk(const char *s, size_t n) { return strnlen(s, n); }
 void *__memchr_chk(const void *s, int c, size_t n, size_t bos) { (void)bos; return (memchr)(s, c, n); }
 void *__memrchr_chk(const void *s, int c, size_t n, size_t bos) { (void)bos; return memrchr(s, c, n); }
+/* __builtin___ 系外部符号形态（编译器未内联时落 PLT——第九轮 __memcpy_chk 实锤）；
+   snprintf/sprintf 系 variadic 用 va 版承接（glibc 惯例含 flag/sl 两参） */
+void *__memcpy_chk(void *d, const void *s, size_t n, size_t dl) { (void)dl; return (memcpy)(d, s, n); }
+void *__memmove_chk(void *d, const void *s, size_t n, size_t dl) { (void)dl; return (memmove)(d, s, n); }
+void *__mempcpy_chk(void *d, const void *s, size_t n, size_t dl) { (void)dl; return (mempcpy)(d, s, n); }
+void *__memset_chk(void *d, int c, size_t n, size_t dl) { (void)dl; return (memset)(d, c, n); }
+char *__stpcpy_chk(char *d, const char *s, size_t dl) { (void)dl; return (stpcpy)(d, s); }
+char *__stpncpy_chk(char *d, const char *s, size_t n, size_t dl) { (void)dl; return (stpncpy)(d, s, n); }
+char *__strcat_chk(char *d, const char *s, size_t dl) { (void)dl; return (strcat)(d, s); }
+char *__strcpy_chk(char *d, const char *s, size_t dl) { (void)dl; return (strcpy)(d, s); }
+char *__strncat_chk(char *d, const char *s, size_t n, size_t dl) { (void)dl; return (strncat)(d, s, n); }
+char *__strncpy_chk(char *d, const char *s, size_t n, size_t dl) { (void)dl; return (strncpy)(d, s, n); }
+int __snprintf_chk(char *str, size_t size, int flag, size_t sl, const char *fmt, ...) {
+  va_list ap; va_start(ap, fmt);
+  int r = (vsnprintf)(str, size, fmt, ap);
+  va_end(ap); (void)flag; (void)sl; return r;
+}
+int __sprintf_chk(char *str, int flag, size_t sl, const char *fmt, ...) {
+  va_list ap; va_start(ap, fmt);
+  int r = (vsprintf)(str, fmt, ap);
+  va_end(ap); (void)flag; (void)sl; return r;
+}
+int __vsnprintf_chk(char *str, size_t size, int flag, size_t sl, const char *fmt, va_list ap) { (void)flag; (void)sl; return (vsnprintf)(str, size, fmt, ap); }
+int __vsprintf_chk(char *str, int flag, size_t sl, const char *fmt, va_list ap) { (void)flag; (void)sl; return (vsprintf)(str, fmt, ap); }
 EOF
     "$CLANG" --sysroot="$SYSROOT" -shared -fPIC -O1 -o "$TGT_LIBS/libexecinfo_stub.so" "$WORK/execinfo-stub.c"
   fi
