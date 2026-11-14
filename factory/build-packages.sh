@@ -406,7 +406,28 @@ if want cffi; then
   build_setup_pkg cffi "$V_cffi" || true
 fi
 if want kiwisolver; then
-  build_setup_pkg kiwisolver "$V_kiwisolver" || true
+  # ★ 链接补丁（闸②③ 真机首验实锤 2026-11-14）：_cext 曾是全树唯一不带 libpython
+  # DT_NEEDED 的扩展（llvm-readelf 全景实证：stdlib 51 件与其余包全带）——真机报
+  # PyType_FromSpec: symbol not found。真机上 libpython 是 libpyengine 的 NEEDED
+  # 级联装载（LOCAL scope 不进全局组），不链它的扩展一个 C-API 符号都解析不到；
+  # qemu verify 跑完整 python 可执行、主程序全局符号兜底故一直全绿掩蔽（libz.so.1 /
+  # pyi 存根同族第三例）。setup_env 的 LDSHARED 预防线对该件未生效（cppy 1.3.x 只覆
+  # 盖 extra_compile_args、不碰链接，LDSHARED 为何未进链接行机理黑盒不深挖），修法 =
+  # sed 给 sdist setup.py 的 Extension 注入 extra_link_args（distutils 链接行必带、
+  # 与 linker 选择机理无关；LDFLAGS 环境通道被 setup_env 硬覆盖，弃用）。补丁后置
+  # 校验 fail-fast：未命中即标红不构建，不静默出坏件。
+  KIWI_DIR="$(fetch_sdist kiwisolver "$V_kiwisolver")" || true
+  if [ -n "$KIWI_DIR" ] && [ -f "$KIWI_DIR/setup.py" ]; then
+    sed -i 's|language="c++",|language="c++", extra_link_args=["-Wl,--no-as-needed", "-lpython3.13"],|' \
+      "$KIWI_DIR/setup.py"
+    if grep -q 'extra_link_args.*lpython3.13' "$KIWI_DIR/setup.py"; then
+      build_setup_pkg kiwisolver "$V_kiwisolver" || true
+    else
+      mark kiwisolver "红（链接补丁未命中，setup.py 形态变化须人工核）"
+    fi
+  else
+    mark kiwisolver "红（sdist 取置失败）"
+  fi
 fi
 if want pillow; then
   # JPEG/PNG/ZLIB_ROOT 必须在 build_setup_pkg 的构建子进程里可见——直接 export（勿用子 shell）
@@ -614,6 +635,11 @@ if want bundle; then
   # CPython 扩展全家 + libz + deps-libs 平铺进 libs（与包 .so 树同目录——设备 dlopen 面）
   cp -fn "$G2_DIR/modules/"*.so "$OUT_DIR/libs/" 2>/dev/null || true
   cp -fn "$G2_DIR/libz.so" "$OUT_DIR/libs/" 2>/dev/null || true
+  # libz.so.1 顶名双供（2132 真机实锤）：门 2 重编的 stdlib 扩展（zlib/binascii）与
+  # lxml/PIL/freetype/libpng 共 7 件按标准 zlib soname 链 libz.so.1，包内只有 SONAME=
+  # libz.so 的 OHOS 副本——设备上 import zlib 即红（qemu 侧被 Alpine rootfs 自带
+  # libz.so.1 掩蔽而全绿）；musl 按文件名解析依赖，同件顶名即可
+  cp -fn "$G2_DIR/libz.so" "$OUT_DIR/libs/libz.so.1" 2>/dev/null || true
   for lib in "$G2_DIR"/deps-libs/*.so*; do cp -fn "$lib" "$OUT_DIR/libs/" 2>/dev/null || true; done
   # 基座运行库（pillow/lxml/matplotlib/OpenBLAS 的 DT_NEEDED 对象）随包平铺
   for lib in libpng16.so.16 libjpeg.so.62 libxml2.so.2 libxslt.so.1 libexslt.so.0 \
