@@ -505,6 +505,11 @@ endian = 'little'
 [properties]
 needs_exe_wrapper = true
 longdouble_format = 'IEEE_QUAD_LE'
+# ★ BLAS 探测加固（第 3 轮 CI 实锤）：meson 的 PkgConfigCLI._get_env 只认 machine
+# properties 的 pkg_config_libdir 属性并显式 set PKG_CONFIG_LIBDIR；只靠外部环境
+# 继承时 vendored meson 在 cross 场景下 openblas 探测 not found 静默回退（run
+# 43737186914 DT_NEEDED 闸红）。值与 build_meson_pkg 内联 env 同串——改路径两处同笔。
+pkg_config_libdir = ['$WORK/pkgconfig', '$PY_DEPS_PREFIX/lib/pkgconfig']
 # ★ DT_NEEDED libpython 预防（同 setuptools 系注释）
 c_link_args = ['-L$PYLIB', '-Wl,--no-as-needed', '-lpython3.13', '-L$PY_DEPS_PREFIX/lib']
 cpp_link_args = ['-L$PYLIB', '-Wl,--no-as-needed', '-lpython3.13', '-L$PY_DEPS_PREFIX/lib']
@@ -622,6 +627,14 @@ if want numpy; then
   fi
   if ! "$LLVM_BIN/llvm-readelf" -d "$MA_SO" | grep -q 'libopenblas.so'; then
     echo "错误：$(basename "$MA_SO") 未 DT_NEEDED libopenblas.so——BLAS 接线失败（meson 静默回退 none？），止损线停机。" >&2
+    # 诊断三件套（第 3 轮加）：闸红必打，定位探测断点在 pc 查找还是 meson 行为
+    echo "== 诊断① meson setup 日志 blas 行 ==" >&2
+    grep -i -E "openblas|blas.*found|Run-time dependency" "$WORK/numpy-meson-setup.log" 2>/dev/null | tail -15 >&2
+    echo "== 诊断② 同 env 直查 pkg-config（绕过 meson）==" >&2
+    PKG_CONFIG_LIBDIR="$WORK/pkgconfig:$PY_DEPS_PREFIX/lib/pkgconfig" \
+      pkg-config --modversion openblas >&2 2>&1 || echo "pkg-config 直查 openblas 失败（ret=$?）" >&2
+    echo "== 诊断③ pc 目录实况 ==" >&2
+    ls -la "$PY_DEPS_PREFIX/lib/pkgconfig/" 2>/dev/null | grep -i -E "blas|total" >&2
     exit 3
   fi
   echo "== numpy BLAS 接线过闸：$(basename "$MA_SO") DT_NEEDED libopenblas.so"
