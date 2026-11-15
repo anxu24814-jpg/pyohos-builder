@@ -244,20 +244,61 @@ else:
     print("  !! wheel 无 version.json（跳过比对）")
 PY
   cp -f "$PDF_OUT/libpdfium.so" "$WORK/pdfium-unpack/pypdfium2_raw/libpdfium.so"
+  # libpdfium.so → OUT_DIR/libs/pypdfium2_raw/（2132 第三红实锤：应用 files 目录的 .so
+  # 不可 dlopen〔W^X/链接器命名空间〕——extras 层不放 .so，bindings.py 补裸名装载走 ldso
+  # 应用 lib 目录搜索；TGT_SITE 保持整树含 .so + 原始 bindings——qemu 无该限制且按
+  # './libpdfium.so' 相对加载）
+  mkdir -p "$OUT_DIR/libs/pypdfium2_raw"
+  cp -f "$PDF_OUT/libpdfium.so" "$OUT_DIR/libs/pypdfium2_raw/libpdfium.so"
   python3 - "$WORK/pdfium-unpack" "$OUT_DIR" "$TGT_SITE" <<'PY'
 import os, shutil, sys
 src, out, tgt = sys.argv[1], sys.argv[2], sys.argv[3]
 # pypdfium2_cfg = _library_scope 运行时 import DEBUG_AUTOCLOSE 的硬依赖（第十轮实锤
-# ModuleNotFoundError）；pypdfium2_cli 无 import 引用不带。.so 只随 pypdfium2_raw。
+# ModuleNotFoundError）；pypdfium2_cli 无 import 引用不带。
 for top in ('pypdfium2', 'pypdfium2_raw', 'pypdfium2_cfg'):
     s = os.path.join(src, top)
     if not os.path.isdir(s):
         print('错误：wheel 解包缺', top); sys.exit(1)
     d1 = os.path.join(out, 'extras', top)
     d2 = os.path.join(tgt, top)
-    shutil.rmtree(d1, ignore_errors=True); shutil.copytree(s, d1, ignore=shutil.ignore_patterns('__pycache__'))
+    # extras：不带 .so（files 目录 dlopen 拒）+ bindings.py 装载解析补丁（2132：files
+    # 目录 .so 不可 dlopen 且裸名搜索不含应用 lib 目录——按 sys.path 逆序解析 bundle lib
+    # 目录绝对路径，与 rpds/pydantic 的绝对路径装载同机制）
+    shutil.rmtree(d1, ignore_errors=True)
+    shutil.copytree(s, d1, ignore=shutil.ignore_patterns('__pycache__', 'libpdfium.so'))
+    if top == 'pypdfium2_raw':
+        bp = os.path.join(d1, 'bindings.py')
+        t = open(bp, encoding='utf-8').read()
+        ORIG = """_libs['pdfium'] = _get_library(
+    name = 'pdfium',
+    dllclass = ctypes.CDLL,
+    libpaths = ('./{prefix}{name}.{suffix}',),
+    search_sys = False,
+)"""
+        NEW = '''def _pdfium_libpath():
+    # 门 3 分体布局（2132 真机实锤三连）：应用 files 目录的 .so 不可 dlopen（W^X/链接器
+    # 命名空间），裸名搜索也不含应用 lib 目录——按 sys.path 逆序找 pypdfium2_raw/libpdfium.so
+    # （逆序 = bundle lib 目录优先于 extras，防旧运行区目录残留 .so 抢先命中被拒路径）
+    import sys, os.path
+    for e in reversed(sys.path):
+        if e:
+            cand = os.path.join(e, 'pypdfium2_raw', 'libpdfium.so')
+            if os.path.isfile(cand):
+                return cand
+    return './lib{name}.{suffix}'  # 兜底原相对形态（整树布局环境）
+
+_libs['pdfium'] = _get_library(
+    name = 'pdfium',
+    dllclass = ctypes.CDLL,
+    libpaths = (_pdfium_libpath(),),
+    search_sys = False,
+)'''
+        assert ORIG in t, 'bindings.py 补丁锚点不在场'
+        open(bp, 'w', encoding='utf-8').write(t.replace(ORIG, NEW))
+        print('  extras bindings.py 已补：sys.path 逆序绝对路径解析')
+    # TGT_SITE：整树原样（qemu 相对装载）
     shutil.rmtree(d2, ignore_errors=True); shutil.copytree(s, d2, ignore=shutil.ignore_patterns('__pycache__'))
-    print('已落位', top, '→ extras + TGT_SITE')
+    print('已落位', top, '→ extras(无 .so) + TGT_SITE(整树)')
 PY
   # dist-info 同步（importlib.metadata 面）
   if [ -d "$WORK/pdfium-unpack/pypdfium2-$V_pypdfium2.dist-info" ]; then

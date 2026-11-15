@@ -124,6 +124,16 @@ if want rootfs; then
   # numpy 等 C++ 扩展的 DT_NEEDED libc++_shared.so（OHOS clang++ 共享 libc++；bundle 段同件随包，
   # 第十跑探针实 qemu 构建期装载面也缺——不拷则 import/pandas 内省必挂）
   cp -f "$SDK_NATIVE/llvm/lib/aarch64-linux-ohos/libc++_shared.so" "$TGT_LIBS/"
+  # libopenblas.so 同理（U1a BLAS 接线后 _multiarray_umath 的 DT_NEEDED 对象）：构建期
+  # 内省（pandas/matplotlib import numpy）与 numpy 探针都在 qemu 里真装载，TGT_LIBS 不
+  # 供给则 import 必挂。PY_DEPS_PREFIX 未设 = gate3 系 rootfs 复用形态（build-gate3.yml
+  # 的 rootfs 步骤不传该变量、不跑 numpy 段），静默跳过；设了而缺件 = 输入坏，硬退。
+  if [ -n "$PY_DEPS_PREFIX" ]; then
+    [ -s "$PY_DEPS_PREFIX/lib/libopenblas.so" ] || {
+      echo "错误：$PY_DEPS_PREFIX/lib/libopenblas.so 不在——BLAS 接线后 qemu 装载面必缺（查 deps artifact）。" >&2
+      exit 1; }
+    cp -f "$PY_DEPS_PREFIX/lib/libopenblas.so" "$TGT_LIBS/"
+  fi
 
   # qemu 冒烟环境的符号差集存根（Guncat 同法）：Alpine musl 与 OHOS musl 的差集——
   # backtrace 族（OHOS libc 有、标准 musl 无）+ __fd_chk（OHOS musl 私有 fd 加固符号，
@@ -586,11 +596,35 @@ PY
 
 if want numpy; then
   # 止损线判据（方案 §6.1 闲 1）：numpy 不绿即整批停——这里失败不吞，硬退
-  # BLAS=none 首版（OpenBLAS 接入第二轮重编；真机 BLAS=none 性能面登记）
-  if ! build_meson_pkg numpy "$V_numpy" -Dblas=none -Dlapack=none -Dallow-noblas=true; then
+  # BLAS 接 OpenBLAS（U1a 2026-11-16；BLAS=none 首版退役）：
+  #   · -Dblas=openblas 走 pkg-config 探测 $PY_DEPS_PREFIX/lib/pkgconfig/openblas.pc
+  #     （0.3.28 seccomp 补丁版；cblas_* 符号全供、NO_LAPACK=1 无 LAPACK 符号——
+  #     numpy 2.5.4 meson.options/meson.build 实读取证：blas 显式名 = dependency(名)
+  #     的 pkg-config 查找，openblas.pc 直连）。
+  #   · -Dlapack=none 留 numpy 内置 lapack_lite（BLAS=none 首版同口径）——OpenBLAS 无
+  #     LAPACK 符号，-Dlapack=openblas 会因 pc 可寻被 meson 误判 HAVE_EXTERNAL_LAPACK，
+  #     numpy.linalg 真调 LAPACK 符号必炸，禁用。
+  #   · -Dallow-noblas=true 保留（2.5.4 meson.options 缺省本就是 true，删掉不等于显式
+  #     失败；显式 false 则 lapack=none 触发 meson.build「No LAPACK library detected」
+  #     硬错，两者不可兼得）——BLAS 静默回退风险由下方 DT_NEEDED 硬闸拦截，不靠选项自律。
+  if ! build_meson_pkg numpy "$V_numpy" -Dblas=openblas -Dlapack=none -Dallow-noblas=true; then
     echo "错误：numpy 构建失败 —— 门 2 止损线命中（方案 §6.1 闲 1），整批停机登记。" >&2
     exit 3
   fi
+  # ★ BLAS 生效防假绿闸（build 期链接面铁证）：meson 在 openblas.pc 探测失败时按
+  # allow-noblas 静默回退无 BLAS 构建（setup 照过、compile 照绿、产物照样拆层）——对
+  # 产物 .so 直接验 DT_NEEDED，未链 libopenblas.so 即假绿，按止损线停机；verify 段
+  # show_config 运行期判据双保险。
+  MA_SO="$(find "$OUT_DIR/libs/numpy" -name '_multiarray_umath*.so' -print -quit)"
+  if [ -z "$MA_SO" ]; then
+    echo "错误：numpy 产物缺 _multiarray_umath .so（拆层异常），止损线停机。" >&2
+    exit 3
+  fi
+  if ! "$LLVM_BIN/llvm-readelf" -d "$MA_SO" | grep -q 'libopenblas.so'; then
+    echo "错误：$(basename "$MA_SO") 未 DT_NEEDED libopenblas.so——BLAS 接线失败（meson 静默回退 none？），止损线停机。" >&2
+    exit 3
+  fi
+  echo "== numpy BLAS 接线过闸：$(basename "$MA_SO") DT_NEEDED libopenblas.so"
   # 探针（第九跑 heavy 段 pandas 内省 import numpy 失败但 tgt-site 树完整，矛盾待定位）：
   # core 侧拆层完成后立即用同一 run-python.sh 冒烟 import，对照 heavy 段结果二分归因
   echo "== numpy 探针：run-python.sh -c 'import numpy'" >&2
@@ -755,7 +789,7 @@ import sys
 ok = []
 def check(name, fn):
     r = fn()
-    # 旧版只把调用次数计入 ok：函数返回 False/None/0 也照样 print("ok") 并凑满 17 项
+    # 旧版只把调用次数计入 ok：函数返回 False/None/0 也照样 print("ok") 并凑满总项数
     # ——恒绿判据（本轮自检发现）。逐项判真值，假值立即抛 → qemu 进程非零 → exit 4
     if not r:
         raise AssertionError(name + " 返回假值：" + repr(r))
@@ -764,6 +798,17 @@ def check(name, fn):
 def _stdlib_exts():
     import zlib, ssl, ctypes  # noqa: F401（sqlite3 未编，不在 28 包闭包——Guncat 有、本项目未供给）
     return ssl.OPENSSL_VERSION
+def _numpy_blas():
+    # BLAS 生效防假绿判据（U1a，运行期半边；build 期 DT_NEEDED 半边在 numpy 段）：
+    # show_config 是 numpy 自录的构建期配置真相，meson 静默回退 none 时此处必不含
+    # openblas；128 阶 @ 走 cblas_dgemv 数值链，链接面坏（符号缺失/重定位错）即假值。
+    import numpy as np
+    c = np.show_config(mode="dicts")
+    s = str(c).lower()
+    if "openblas" not in s:
+        raise AssertionError("numpy 配置未含 openblas（BLAS 静默回退？）：" + s[:400])
+    m = np.arange(1.0, 16385.0).reshape(128, 128)
+    return float((m @ np.ones(128))[-1]) == 2089024.0  # 末行和 = 16384*127+8256
 def _png_roundtrip():
     from PIL import Image
     import io
@@ -779,6 +824,28 @@ def _mpl_png():
     fig.savefig("/tmp/mpl-smoke.png", dpi=40)
     import os
     return os.path.getsize("/tmp/mpl-smoke.png") > 0
+def _mpl_3d():
+    # Axes3D 专查（2165 节遗留；Guncat 同款先例 = 漏 mpl_toolkits 随 extras → 3D 投影
+    # 不可用）：显式 import 即判 mpl_toolkits 在 extras 层；3d 投影注册 + 出图 + 无
+    # 「unknown projection」族 UserWarning 三判合一（warnings 只录不抛，白名单外告警
+    # 不误伤——字体回退类与判据无关）。
+    import os, warnings
+    import matplotlib
+    matplotlib.use("Agg")
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 —— extras 层缺 mpl_toolkits 即 ImportError
+    import matplotlib.pyplot as plt
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always", UserWarning)
+        fig = plt.figure()
+        ax = fig.add_subplot(projection="3d")
+        ax.plot([1, 2, 3], [1, 4, 9], [1, 8, 27])
+        fig.savefig("/tmp/mpl-3d-smoke.png", dpi=40)
+    bad = [str(x.message) for x in w
+           if "projection" in str(x.message).lower() or "3d" in str(x.message).lower()]
+    if bad:
+        raise AssertionError("3D 投影 UserWarning：" + "; ".join(bad))
+    plt.close(fig)
+    return ax.name == "3d" and os.path.getsize("/tmp/mpl-3d-smoke.png") > 0
 def _cffi():
     import cffi
     return cffi.FFI().sizeof("int")
@@ -793,6 +860,7 @@ check("dateutil", lambda: __import__("dateutil").__version__)
 check("fonttools", lambda: __import__("fontTools").version)
 check("numpy", lambda: __import__("numpy").__version__)
 check("numpy-arange-sum", lambda: __import__("numpy").arange(12).reshape(3, 4).sum())
+check("numpy-blas", lambda: _numpy_blas())
 check("pandas", lambda: __import__("pandas").__version__)
 check("pandas-groupby", lambda: int(__import__("pandas").DataFrame(
     {"c": ["a", "b", "a"], "v": [1, 2, 3]}).groupby("c")["v"].sum()["a"]))
@@ -803,10 +871,11 @@ check("cffi-ffi-sizeof", lambda: _cffi())
 check("kiwisolver", lambda: __import__("kiwisolver").__version__)
 check("contourpy", lambda: __import__("contourpy").__version__)
 check("matplotlib-agg", lambda: _mpl_png())
+check("matplotlib-3d", lambda: _mpl_3d())
 check("lxml-xpath", lambda: _lxml_etree().__version__)
 check("lxml-parse", lambda: _lxml_etree().fromstring(b"<a x='1'/>").get("x"))
-if len(ok) != 17:
-    raise SystemExit("SMOKE-FAIL 仅 %d 项通过，应有 17 项" % len(ok))
+if len(ok) != 19:
+    raise SystemExit("SMOKE-FAIL 仅 %d 项通过，应有 19 项" % len(ok))
 print("SMOKE-OK", len(ok), "items passed")
 EOF
   ( cd "$VWORK" && ./run-verify.sh smoke_all.py ) \

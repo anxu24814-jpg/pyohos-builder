@@ -3,8 +3,8 @@
 # 方案依据：docs/方案-鸿蒙内置Python运行环境-20261106.md §6.1 闲 1（门 2 全量起步笔）。
 #
 # ── 结构（两 job 串行接力，每 job 独立缓存/产物）──────────────────────────────
-#   job deps   ：build-native-deps.sh 编九个原生依赖 → artifact ohos-py-deps-prefix
-#                （OpenSSL/libffi/freetype/libpng/libjpeg/libxml2/libxslt/qhull/zlib，
+#   job deps   ：build-native-deps.sh 编十个原生依赖 → artifact ohos-py-deps-prefix
+#                （OpenSSL/libffi/freetype/libpng/libjpeg/libxml2/libxslt/qhull/zlib/OpenBLAS，
 #                 全 native 交叉编译无 qemu，预计 20~40 分钟）
 #   job cpython：build-cpython-ohos.sh 带 PY_DEPS_PREFIX 重建——解禁 _ctypes、
 #                供给 _ssl/_hashlib、全部扩展重链 DT_NEEDED libpython →
@@ -170,10 +170,13 @@ jobs:
           [ -s "host-bundle/lib/libpython3.13.so" ] || { echo "host-bundle 缺 libpython"; exit 1; }
           [ -s "host-bundle/include/python3.13/Python.h" ] || { echo "host-bundle 缺 include 树"; exit 1; }
           file libpython3.13.so libz.so deps-libs/*.so modules/*.so | tee arch-report.txt
+          # 正向断言：至少一行 ARM aarch64（门 0 build.yml 同款；空报告/全非 ELF 时
+          # 单靠下面的反向 grep 会被 "|| true" 吞成绿）
+          grep -c 'ARM aarch64' arch-report.txt >/dev/null
           grep -v 'ARM aarch64' arch-report.txt | grep -q ELF \
             && { echo "存在非 aarch64 的 ELF 产物"; exit 1; } || true
-          # 扩展 DT_NEEDED libpython 抽查（机制坑 B；全量守卫在包构建 workflow 的
-          # check-sonames 环节，这里抽 _ssl/_ctypes 两个新解禁扩展）
+          # 扩展 DT_NEEDED libpython 抽查（机制坑 B；全量守卫尚未落 workflow，这里抽
+          # _ssl/_ctypes/math 三个扩展，包 .so 树抽查在本机 place-gate2.sh 落位后做）
           READELF="$HOME/ohos-sdk-native/llvm/bin/llvm-readelf"
           for mod in modules/_ssl.*.so modules/_ctypes.*.so modules/math.*.so; do
             "$READELF" -d "$mod" | grep -q 'libpython3.13.so' \

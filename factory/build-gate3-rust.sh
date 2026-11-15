@@ -191,8 +191,14 @@ PY
   python3 - "$WORK/g3-unpack/$top" "$OUT_DIR" "$TGT_SITE" "$name" <<'PY'
 import os, shutil, sys
 src, out, tgt, name = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+# pyi-only 存根目录剔除面（2132 真机实锤：分体布局下 pyi-only 目录成命名空间包阴影，
+# 把 sitecustomize 合体 finder 挡在身后——pydantic_core/_pydantic_core 与 cryptography
+# 的 _rust 两处；TGT_SITE 整树同剔除保持与设备面一致）
+STUB_DIRS = ('pydantic_core/_pydantic_core', 'cryptography/hazmat/bindings/_rust')
 for root, dirs, files in os.walk(src):
     rel = os.path.relpath(root, src)
+    if any(rel == s or rel.startswith(s + os.sep) for s in STUB_DIRS):
+        continue
     for f in files:
         p = os.path.join(root, f)
         # dist-info 原样进 extras（运行期 importlib.metadata 查询面）与 TGT_SITE
@@ -207,7 +213,7 @@ for root, dirs, files in os.walk(src):
         shutil.copy2(p, tdst)
         if rel == '.' and f.endswith('.so'):
             print('顶层扩展平铺', f)
-print('已拆层', name)
+print('已拆层', name, '（剔除存根目录', len(STUB_DIRS), '处）')
 PY
   mark "$name" "OK（$ver）"
 }

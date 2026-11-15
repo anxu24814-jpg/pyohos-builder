@@ -1,0 +1,109 @@
+# 门 5 白名单自装包 qemu 预验证 workflow（2026-11-16 U1a）：verify-user-pkgs.sh 的
+# builder 仓机跑面（脚本与 aicontrol 仓 scripts/python-runtime/verify-user-pkgs.sh 同源，
+# 本仓 factory/ 下为 CI 消费副本）。独立 yml（不并入 build-packages.yml 加第三 job）理由：
+# 输入 = 既有 artifacts（gate2 的 g2 tarball + deps prefix 作 rootfs 原料、build-packages
+# 的 pkg-final 作双 zip 与 libs），纯验证零构建——白名单或布局回归时单跑约 15 分钟，
+# 不必重付 24 包全量构建；本仓惯例本就是一门一族一个 workflow（build/gate2/gate3/
+# packages/diag-async 全部独立 workflow_dispatch）。
+# 前置：build-gate2 与 build-packages 各有成功 run（gh run download 最近一次成功产物）。
+# 判据：日志出现 USER-PKGS-OK 9 items passed（脚本 exit 0）。
+name: verify-user-pkgs
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  SDK_URL: https://repo.huaweicloud.com/openharmony/os/7.0-Release/ohos-sdk-windows_linux-public_20260829.tar.gz
+  SDK_SHA256: 6bf6ae1efe8de0e8bd15ddbd7fac58bcb54d9620262a541b9b219439317a4c42
+  SDK_FILENAME: ohos-sdk-windows_linux-public_20260829.tar.gz
+
+jobs:
+  verify-user-pkgs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # build-packages.sh 启动即全量校验 curl/tar/make/ninja/qemu-aarch64-static/
+      # pkg-config（不分 stage），此处一并装齐
+      - name: Install tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static ninja-build pkg-config unzip
+
+      - name: Restore OHOS SDK cache
+        id: sdk
+        uses: actions/cache@v4
+        with:
+          path: ~/ohos-sdk-native
+          key: ohos-sdk-native-${{ env.SDK_FILENAME }}
+
+      - name: Download and extract OHOS SDK (linux native)
+        if: steps.sdk.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          cd "$RUNNER_TEMP"
+          curl -C - --retry 3 --retry-delay 10 -o "$SDK_FILENAME" "$SDK_URL"
+          echo "$SDK_SHA256  $SDK_FILENAME" | sha256sum -c -
+          tar -xzf "$SDK_FILENAME"
+          rm -f "$SDK_FILENAME"
+          cd ohos-sdk/linux
+          unzip -q native-linux-x64-*.zip
+          rm -f ./*.zip
+          mv native "$HOME/ohos-sdk-native"
+          cd "$RUNNER_TEMP" && rm -rf ohos-sdk
+
+      - name: Fetch latest gate2 artifacts
+        run: |
+          set -euxo pipefail
+          G2_RUN=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow build-gate2 --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          [ -n "$G2_RUN" ] || { echo "无成功的 build-gate2 run——先跑 build-gate2"; exit 1; }
+          gh run download "$G2_RUN" --repo "$GITHUB_REPOSITORY" \
+            --name ohos-py-deps-prefix --dir "$RUNNER_TEMP/deps"
+          gh run download "$G2_RUN" --repo "$GITHUB_REPOSITORY" \
+            --name cpython-ohos-3.13.18-aarch64-g2 --dir "$RUNNER_TEMP/g2"
+          mkdir -p "$HOME/ohos-py-deps" "$RUNNER_TEMP/g2x"
+          tar -xzf "$RUNNER_TEMP/deps/ohos-py-deps-prefix.tar.gz" -C "$HOME/ohos-py-deps"
+          tar -xzf "$RUNNER_TEMP/g2/cpython-ohos-3.13.18-aarch64-g2.tar.gz" -C "$RUNNER_TEMP/g2x"
+          ls "$RUNNER_TEMP/g2x"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Fetch latest build-packages pkg-final artifact
+        run: |
+          set -euxo pipefail
+          BP_RUN=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow build-packages --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          [ -n "$BP_RUN" ] || { echo "无成功的 build-packages run——先跑 build-packages"; exit 1; }
+          gh run download "$BP_RUN" --repo "$GITHUB_REPOSITORY" --name pkg-final --dir "$RUNNER_TEMP/pfinal"
+          ls -l "$RUNNER_TEMP/pfinal"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      # rootfs 自举（qemu 目标解释器环境；PY_DEPS_PREFIX 传齐 = 脚本会把 libopenblas
+      # 一并供进 TGT_LIBS，与 build-packages 流程同形态）
+      - name: Bootstrap qemu rootfs (STAGE=rootfs)
+        run: |
+          set -euxo pipefail
+          export SDK_NATIVE="$HOME/ohos-sdk-native" \
+                 G2_DIR="$RUNNER_TEMP/g2x" \
+                 PY_DEPS_PREFIX="$HOME/ohos-py-deps/prefix" \
+                 OUT_DIR="$GITHUB_WORKSPACE/pkg-out" \
+                 WORK="$HOME/ohos-py-pkgs"
+          STAGE=rootfs bash factory/build-packages.sh
+
+      - name: Run verify-user-pkgs (five-layer layout, 9-item smoke)
+        run: |
+          set -euxo pipefail
+          # 输入源 = builder 仓自身 artifacts 组装（RAW_PY/LIBS 环境变量改指；脚本缺省
+          # 指 aicontrol 工作副本布局——builder 机上不存在，故必须传）
+          mkdir -p "$RUNNER_TEMP/userpy/rawfile-python" "$RUNNER_TEMP/userpy/libs"
+          cp -f "$RUNNER_TEMP/pfinal/site-packages.zip" "$RUNNER_TEMP/pfinal/extras.zip" \
+            "$RUNNER_TEMP/userpy/rawfile-python/"
+          # pkg-libs.tar.gz 内是 libs/ 顶层树——strip 一层平铺进 LIBS 目录
+          tar -xzf "$RUNNER_TEMP/pfinal/pkg-libs.tar.gz" -C "$RUNNER_TEMP/userpy/libs" --strip-components=1
+          RAW_PY="$RUNNER_TEMP/userpy/rawfile-python" \
+          LIBS="$RUNNER_TEMP/userpy/libs" \
+          WORK="$HOME/ohos-py-pkgs" bash factory/verify-user-pkgs.sh
