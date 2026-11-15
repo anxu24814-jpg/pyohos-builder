@@ -1,6 +1,8 @@
 # 门 2 包构建 workflow（2026-11-07）：24 件包（15 纯 py + 9 C/C++）交叉编译。
 # 前置：build-gate2 已产出 ohos-py-deps-prefix 与 cpython-ohos-3.13.18-aarch64-g2
 # 两个 artifact（本 workflow 从最近成功 run 拉取；过期重跑 build-gate2）。
+# 2026-11-16：runs-on 钉 ubuntu-24.04——ubuntu-latest 已切 26.04（run 43736635616 两连红
+# 实锤 qemu-user-static 无安装候选），钉回 11-14 已知绿镜像整面；镜像退役时再迁。
 #
 # ── job 结构（两 job 接力，各自 85 分钟限内）──────────────────────────────────
 #   pkgs-core  ：rootfs(qemu 环境) + 纯 py 15 件 + setuptools 系 5 件
@@ -27,7 +29,7 @@ env:
 
 jobs:
   pkgs-core:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 85
     steps:
       - name: Checkout
@@ -115,7 +117,7 @@ jobs:
           if-no-files-found: error
 
   pkgs-heavy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 85
     needs: pkgs-core
     steps:

@@ -7,6 +7,8 @@
 # packages/diag-async 全部独立 workflow_dispatch）。
 # 前置：build-gate2 与 build-packages 各有成功 run（gh run download 最近一次成功产物）。
 # 判据：日志出现 USER-PKGS-OK 9 items passed（脚本 exit 0）。
+# 2026-11-16：runs-on 钉 ubuntu-24.04——ubuntu-latest 已切 26.04（build-packages run
+# 43736635616 两连红实锤 qemu-user-static 无安装候选），与 build-packages 同钉。
 name: verify-user-pkgs
 
 on:
@@ -23,7 +25,7 @@ env:
 
 jobs:
   verify-user-pkgs:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 50
     steps:
       - name: Checkout
