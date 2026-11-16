@@ -486,15 +486,33 @@ Cflags: -I\${includedir}
 EOF
   for n in python3 python3-embed python-3.13-embed; do
     cp -f "$WORK/pkgconfig/python-3.13.pc" "$WORK/pkgconfig/$n.pc"; done
-  # ★ BLAS 探测双保险（第 4 轮）：openblas.pc 复制进 $WORK/pkgconfig——vendored meson
-  # 的 _get_env 会把 PKG_CONFIG_PATH 覆盖为空且 LIBDIR 只认 cross file 属性/外部继承，
-  # $WORK/pkgconfig 是全通道（LIBDIR 第一目录 + cross file 属性第一位）都命中的兜底位。
+  # ★ BLAS 探测兜底位 + musl affinity stub（第 4/5 轮）：根因 = OpenBLAS 0.3.28 引用
+  # pthread_setaffinity_np / pthread_getaffinity_np（GNU 扩展，OHOS musl 无此二符号），
+  # lld 默认 --no-allow-shlib-undefined 使 meson OpenBLAS 专用依赖的 probe_symbols
+  # 链接测试必败（run 43779234132 诊断①②分叉实证：--modversion 绿 / links 红），
+  # dependency 掰回 not found 后被 allow-noblas 静默回退。修法 = musl 通行 affinity
+  # stub（静态并入，运行期调到即安全失败返回 -1 = OpenBLAS 不绑核，语义无损）：
+  #   ① stub 编 aarch64 .a 落 $WORK/lib；
+  #   ② openblas.pc 重写落 $WORK/pkgconfig（LIBDIR 第一位，兜底版优先于 deps 原版
+  #      命中）——prefix 重写为当前 PY_DEPS_PREFIX 真值 + Libs 追加 stub。
   # 硬退判据：BLAS 是本轮承诺面，deps 缺 openblas.pc 属输入坏（P0-1），不静默降级。
   [ -s "$PY_DEPS_PREFIX/lib/pkgconfig/openblas.pc" ] || {
     echo "错误：$PY_DEPS_PREFIX/lib/pkgconfig/openblas.pc 不在（deps artifact 缺件），BLAS 接线输入坏。" >&2
     exit 3
   }
-  cp -f "$PY_DEPS_PREFIX/lib/pkgconfig/openblas.pc" "$WORK/pkgconfig/"
+  mkdir -p "$WORK/lib"
+  printf '/* musl affinity stub：OHOS musl 无 pthread_{set,get}affinity_np（GNU 扩展），\n * OpenBLAS 引用致链接测试与装载失败——stub 安全失败（返 -1/0 = 不绑核）。 */\nint pthread_setaffinity_np(void) { return -1; }\nint pthread_getaffinity_np(void) { return -1; }\n' \
+    > "$WORK/lib/py_affinity_stub.c"
+  "$CLANG" -c "$WORK/lib/py_affinity_stub.c" -o "$WORK/lib/py_affinity_stub.o" \
+    || { echo "错误：affinity stub 编译失败（工具链输入坏）。" >&2; exit 3; }
+  "$LLVM_BIN/llvm-ar" rcs "$WORK/lib/libpy_affinity_stub.a" "$WORK/lib/py_affinity_stub.o" \
+    || { echo "错误：affinity stub 归档失败。" >&2; exit 3; }
+  cp -f "$PY_DEPS_PREFIX/lib/pkgconfig/openblas.pc" "$WORK/pkgconfig/openblas.pc"
+  sed -i "s|^prefix=.*|prefix=$PY_DEPS_PREFIX|; \
+s|^Libs: \(.*\)-lopenblas$|Libs: \1-lopenblas -L$WORK/lib -lpy_affinity_stub|" \
+    "$WORK/pkgconfig/openblas.pc"
+  grep -q 'lpy_affinity_stub' "$WORK/pkgconfig/openblas.pc" \
+    || { echo "错误：openblas.pc Libs 行追 stub 未命中（上游 pc 格式漂移），停机核对。" >&2; exit 3; }
   cat > "$MESON_CROSS" <<EOF
 [binaries]
 c = '$CLANG'
