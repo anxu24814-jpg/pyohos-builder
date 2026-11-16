@@ -126,4 +126,5 @@ jobs:
           tar -xzf "$RUNNER_TEMP/pfinal/pkg-libs.tar.gz" -C "$RUNNER_TEMP/userpy/libs" --strip-components=1
           RAW_PY="$RUNNER_TEMP/userpy/rawfile-python" \
           LIBS="$RUNNER_TEMP/userpy/libs" \
-          G3_OUT="$RUNNER_TEMP/g3merge" \n          WORK="$HOME/ohos-py-pkgs" bash factory/verify-user-pkgs.sh
+          G3_OUT="$RUNNER_TEMP/g3merge" \
+          WORK="$HOME/ohos-py-pkgs" bash factory/verify-user-pkgs.sh
