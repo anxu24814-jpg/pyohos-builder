@@ -77,11 +77,18 @@ while IFS='|' read -r name version sha url; do
 done <<< "$WHITELIST"
 
 # qemu 运行器（PYTHONPATH 五层 = 真机门 5 布局：py-site 在 extras 与 libs 之间）
+# fortify 符号族差集存根（同 build-packages.sh rootfs 段 run-python.sh 形制）：qemu 的
+# Alpine musl 无 OHOS fortify 符号（__fd_chk 等），stdlib 扩展装载即 relocation 失败
+# ——首跑实锤 select.cpython-313.so: __fd_chk: symbol not found；stub 随 rootfs
+# 自举（STAGE=rootfs）生成在 $ROOTFS/py/ext/。
+STUB="$ROOTFS/py/ext/libexecinfo_stub.so"
+[ -s "$STUB" ] || { echo "错误：fortify 存根不在（$STUB）——rootfs 自举未跑或布局漂移。" >&2; exit 1; }
 cat > "$VWORK/run-user-verify.sh" <<EOF
 #!/bin/sh
 export PYTHONHOME=$ROOTFS/usr/local
 export PYTHONPATH=$ROOTFS/py/python313.zip:$VWORK/site-root/site-packages.zip:\$PWD/extras:\$PWD/site-root/py-site:\$PWD/libs
 export LD_LIBRARY_PATH=\$PWD/libs
+export LD_PRELOAD=$STUB
 exec qemu-aarch64-static -L $ROOTFS $ROOTFS/usr/local/bin/python3.13 "\$@"
 EOF
 chmod +x "$VWORK/run-user-verify.sh"
