@@ -84,6 +84,24 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
+      # gate3 增量（Rust 三件 + pypdfium2 的 extras py 树与 .so）：白名单闭包可落在预置
+      # gate3 层（pdfminer.six 20260107 硬依赖 cryptography 实锤），布局须全量同构真机
+      - name: Fetch latest gate3 artifacts
+        run: |
+          set -euxo pipefail
+          G3_RUN=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow build-gate3 --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          [ -n "$G3_RUN" ] || { echo "无成功的 build-gate3 run——先跑 build-gate3"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/g3x" "$RUNNER_TEMP/g3t" "$RUNNER_TEMP/g3merge/extras" "$RUNNER_TEMP/g3merge/libs"
+          gh run download "$G3_RUN" --repo "$GITHUB_REPOSITORY" -D "$RUNNER_TEMP/g3x"
+          for t in "$RUNNER_TEMP"/g3x/*/gate3-*.tar.gz; do
+            tar -xzf "$t" -C "$RUNNER_TEMP/g3t"
+          done
+          cp -fr "$RUNNER_TEMP/g3t/gate3-out/extras/." "$RUNNER_TEMP/g3merge/extras/"
+          cp -fr "$RUNNER_TEMP/g3t/gate3-out/libs/." "$RUNNER_TEMP/g3merge/libs/"
+          ls "$RUNNER_TEMP/g3merge/extras" | head
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       # rootfs 自举（qemu 目标解释器环境；PY_DEPS_PREFIX 传齐 = 脚本会把 libopenblas
       # 一并供进 TGT_LIBS，与 build-packages 流程同形态）
       - name: Bootstrap qemu rootfs (STAGE=rootfs)
@@ -108,4 +126,4 @@ jobs:
           tar -xzf "$RUNNER_TEMP/pfinal/pkg-libs.tar.gz" -C "$RUNNER_TEMP/userpy/libs" --strip-components=1
           RAW_PY="$RUNNER_TEMP/userpy/rawfile-python" \
           LIBS="$RUNNER_TEMP/userpy/libs" \
-          WORK="$HOME/ohos-py-pkgs" bash factory/verify-user-pkgs.sh
+          G3_OUT="$RUNNER_TEMP/g3merge" \n          WORK="$HOME/ohos-py-pkgs" bash factory/verify-user-pkgs.sh
