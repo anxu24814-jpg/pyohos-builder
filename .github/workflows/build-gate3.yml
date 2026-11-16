@@ -31,7 +31,7 @@ env:
 
 jobs:
   rust-trio:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 85
     steps:
       - name: Checkout
@@ -137,7 +137,7 @@ jobs:
 
   # ── PDFium 域（与 rust-trio 独立并行；源码树缓存控时长，首轮 sync 无缓存最重）──
   pdfium:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 85
     steps:
       - name: Checkout
