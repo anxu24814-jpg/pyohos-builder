@@ -486,6 +486,15 @@ Cflags: -I\${includedir}
 EOF
   for n in python3 python3-embed python-3.13-embed; do
     cp -f "$WORK/pkgconfig/python-3.13.pc" "$WORK/pkgconfig/$n.pc"; done
+  # ★ BLAS 探测双保险（第 4 轮）：openblas.pc 复制进 $WORK/pkgconfig——vendored meson
+  # 的 _get_env 会把 PKG_CONFIG_PATH 覆盖为空且 LIBDIR 只认 cross file 属性/外部继承，
+  # $WORK/pkgconfig 是全通道（LIBDIR 第一目录 + cross file 属性第一位）都命中的兜底位。
+  # 硬退判据：BLAS 是本轮承诺面，deps 缺 openblas.pc 属输入坏（P0-1），不静默降级。
+  [ -s "$PY_DEPS_PREFIX/lib/pkgconfig/openblas.pc" ] || {
+    echo "错误：$PY_DEPS_PREFIX/lib/pkgconfig/openblas.pc 不在（deps artifact 缺件），BLAS 接线输入坏。" >&2
+    exit 3
+  }
+  cp -f "$PY_DEPS_PREFIX/lib/pkgconfig/openblas.pc" "$WORK/pkgconfig/"
   cat > "$MESON_CROSS" <<EOF
 [binaries]
 c = '$CLANG'
@@ -550,6 +559,9 @@ build_meson_pkg() {
       $mc setup builddir --cross-file "$MESON_CROSS" \
       --prefix="$WORK/meson-prefix-$top" -Dbuildtype=release "$@" \
       > "$WORK/$top-meson-setup.log" 2>&1
+    # 依赖探测回显（第 4 轮加）：BLAS 接线真相面——setup 完成即打 meson 对各依赖的
+    # 原话（绿也打），闸红定位不再依赖事后猜 log 文件名。
+    grep -i -E "dependency .*found|Found pkg-config" "$WORK/$top-meson-setup.log" 2>/dev/null | head -25 || true
     $mc compile -C builddir -j "$(nproc)" > "$WORK/$top-meson-build.log" 2>&1
     rm -rf "$WORK/meson-dest-$top"
     DESTDIR="$WORK/meson-dest-$top" $mc install -C builddir > "$WORK/$top-meson-install.log" 2>&1
@@ -627,14 +639,19 @@ if want numpy; then
   fi
   if ! "$LLVM_BIN/llvm-readelf" -d "$MA_SO" | grep -q 'libopenblas.so'; then
     echo "错误：$(basename "$MA_SO") 未 DT_NEEDED libopenblas.so——BLAS 接线失败（meson 静默回退 none？），止损线停机。" >&2
-    # 诊断三件套（第 3 轮加）：闸红必打，定位探测断点在 pc 查找还是 meson 行为
-    echo "== 诊断① meson setup 日志 blas 行 ==" >&2
-    grep -i -E "openblas|blas.*found|Run-time dependency" "$WORK/numpy-meson-setup.log" 2>/dev/null | tail -15 >&2
+    # 诊断三件套（第 3 轮加、第 4 轮修健壮）：set -euo pipefail 下逐条隔离——
+    # 第 3 轮实锤教训：文件名猜错（$top 带版本号）grep exit 2 直接截断诊断段。
+    set +e
+    echo "== 诊断① meson setup 日志依赖行 ==" >&2
+    grep -h -i -E "openblas|blas|lapack|dependency .*found|Found pkg-config" \
+      "$WORK/"*-meson-setup.log 2>&1 | tail -30 >&2
     echo "== 诊断② 同 env 直查 pkg-config（绕过 meson）==" >&2
     PKG_CONFIG_LIBDIR="$WORK/pkgconfig:$PY_DEPS_PREFIX/lib/pkgconfig" \
-      pkg-config --modversion openblas >&2 2>&1 || echo "pkg-config 直查 openblas 失败（ret=$?）" >&2
+      pkg-config --modversion openblas 2>&1 | head -3 >&2
+    echo "  （pkg-config ret=$?）" >&2
     echo "== 诊断③ pc 目录实况 ==" >&2
-    ls -la "$PY_DEPS_PREFIX/lib/pkgconfig/" 2>/dev/null | grep -i -E "blas|total" >&2
+    ls -la "$WORK/pkgconfig/" "$PY_DEPS_PREFIX/lib/pkgconfig/" 2>&1 | grep -i -E "blas|total|No such" >&2
+    set -e
     exit 3
   fi
   echo "== numpy BLAS 接线过闸：$(basename "$MA_SO") DT_NEEDED libopenblas.so"
