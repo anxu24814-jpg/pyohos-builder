@@ -703,8 +703,28 @@ if want matplotlib; then
       cp -f "$PY_DEPS_PREFIX/lib/$lib" "$OUT_DIR/libs/"
       "$STRIP" --strip-unneeded "$OUT_DIR/libs/$lib" 2>/dev/null || true
     done
-    # mpl_toolkits 随 extras（Guncat：漏了 3D 投影不可用）
-    :
+    # mpl_toolkits 随树（Guncat：漏了 3D 投影不可用；门 2 注释占位未落码——本轮 mpl-3d
+    # verify 项实锤抓出 ModuleNotFoundError）。build_meson_pkg 拆层只收
+    # site-packages/<包名> 单目录，mpl_toolkits 是与 matplotlib 平级的独立目录，须
+    # 从 meson install 树补收进三层（extras 纯 py / libs 保 .so / TGT_SITE 构建期
+    # import；mplot3d 现行纯 py，.so 分支为对称保险）。
+    MPL_TK_SRC="$(find "$WORK"/meson-dest-matplotlib-* -type d -name mpl_toolkits \
+      -path '*site-packages*' -print -quit 2>/dev/null)"
+    if [ -n "$MPL_TK_SRC" ] && [ -d "$MPL_TK_SRC" ]; then
+      for layer in "$OUT_DIR/extras" "$OUT_DIR/libs" "$TGT_SITE"; do
+        rm -rf "$layer/mpl_toolkits"
+        cp -r "$MPL_TK_SRC" "$layer/mpl_toolkits"
+        find "$layer/mpl_toolkits" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+      done
+      find "$OUT_DIR/extras/mpl_toolkits" \( -name '*.so' -o -name '*.pyx' -o -name '*.pxd' \) -delete 2>/dev/null || true
+      for f in $(find "$OUT_DIR/libs/mpl_toolkits" -name '*.so' 2>/dev/null); do
+        "$STRIP" --strip-unneeded "$f" 2>/dev/null || true
+      done
+      echo "== mpl_toolkits 三层补收：$(du -sh "$OUT_DIR/extras/mpl_toolkits" | cut -f1)"
+    else
+      echo "错误：matplotlib install 树无 mpl_toolkits（上游布局漂移），停机核对。" >&2
+      exit 3
+    fi
   fi
 fi
 
