@@ -650,7 +650,7 @@ if want numpy; then
   # allow-noblas 静默回退无 BLAS 构建（setup 照过、compile 照绿、产物照样拆层）——对
   # 产物 .so 直接验 DT_NEEDED，未链 libopenblas.so 即假绿，按止损线停机；verify 段
   # show_config 运行期判据双保险。
-  MA_SO="$(find "$OUT_DIR/libs/numpy" -name '_multiarray_umath*.so' -print -quit)"
+  MA_SO="$(find "$OUT_DIR/libs/numpy" -name '_multiarray_umath*.so' -print -quit 2>/dev/null || true)"
   if [ -z "$MA_SO" ]; then
     echo "错误：numpy 产物缺 _multiarray_umath .so（拆层异常），止损线停机。" >&2
     exit 3
@@ -709,7 +709,7 @@ if want matplotlib; then
     # 从 meson install 树补收进三层（extras 纯 py / libs 保 .so / TGT_SITE 构建期
     # import；mplot3d 现行纯 py，.so 分支为对称保险）。
     MPL_TK_SRC="$(find "$WORK"/meson-dest-matplotlib-* -type d -name mpl_toolkits \
-      -path '*site-packages*' -print -quit 2>/dev/null)"
+      -path '*site-packages*' -print -quit 2>/dev/null || true)"
     if [ -n "$MPL_TK_SRC" ] && [ -d "$MPL_TK_SRC" ]; then
       for layer in "$OUT_DIR/extras" "$OUT_DIR/libs" "$TGT_SITE"; do
         rm -rf "$layer/mpl_toolkits"
@@ -900,7 +900,8 @@ def _mpl_3d():
     import os, warnings
     import matplotlib
     matplotlib.use("Agg")
-    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 —— extras 层缺 mpl_toolkits 即 ImportError
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 —— 预置层缺 mpl_toolkits 即 ImportError
+    #（注：verify 的 libs 层为整树含 .py，真机 extras 缺件的兜底靠 2184-2 三层复制钉）
     import matplotlib.pyplot as plt
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always", UserWarning)
