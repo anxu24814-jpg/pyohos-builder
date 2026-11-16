@@ -56,6 +56,16 @@ mkdir -p "$VWORK/site-root/py-site" "$VWORK/extras" "$VWORK/libs" "$VWORK/wheels
 cp -f "$RAW_PY/site-packages.zip" "$VWORK/site-root/"
 ( cd "$VWORK/extras" && unzip -qo "$RAW_PY/extras.zip" )
 cp -fr "$LIBS/"* "$VWORK/libs/"
+# gate3 增量（可选并入）：白名单闭包可落在预置 gate3 层（pdfminer.six 20260107 硬依赖
+# cryptography——首跑 ModuleNotFoundError 实锤），builder CI 传 G3_OUT=<含 extras/ 与
+# libs/ 子树的目录> 使布局全量同构真机；本地缺省空 = aicontrol 工作副本形态（entry/libs
+# 已含 gate3 .so、rawfile extras.zip 已含 gate3 合并树，天然全量无需并入）。
+G3_OUT="${G3_OUT:-}"
+if [ -n "$G3_OUT" ]; then
+  [ -d "$G3_OUT/extras" ] || { echo "错误：G3_OUT=$G3_OUT 无 extras/ 子树。" >&2; exit 1; }
+  cp -fr "$G3_OUT/extras/." "$VWORK/extras/"
+  [ -d "$G3_OUT/libs" ] && cp -fr "$G3_OUT/libs/." "$VWORK/libs/"
+fi
 
 # 下载 + sha256 校验 + 解包进 py-site（与 PyPackages.ets 引导脚本闸序同源：哈希 → 内容
 # 检查（此处 unzip 前列黑名单）→ 解包）
