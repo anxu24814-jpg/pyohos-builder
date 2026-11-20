@@ -6,9 +6,9 @@
 # 配方出处：lzzhij/harmonyos-node-notes（CC BY 4.0）真机先例配方，经
 # docs/调研-鸿蒙Node运行时构建路线-20261120.md §3.1 原文核对；骨架抄本项目
 # scripts/python-runtime/factory/build-native-deps.sh（ERR trap + 分段 + 自校验风格）。
-# 注意：--v8-disable-temporal-support 在 v24.22.3 的 configure 已无此开关
-# （parse_known_args 容忍 = 静默空操作）——保留该参只为配方保真，失败归因时勿计此项
-# （任务书 §1 注）。
+# 注意：先例配方的 --v8-disable-temporal-support 在 v24.22.3 已无此开关——configure 将
+# 未知参透传给 gyp 直接硬红（首跑 run 44776777547 实锤，2026-11-21 修），已从配方删除；
+# Temporal 支持在 v24 系现为树内默认态，无需开关。
 #
 # yml 只做取 SDK/源码与调本脚本（build-node.yml）；本脚本承担任务书 §4 步骤 b（探针）、
 # d（configure+make）、e（产物六件）、f（runner 校验）。
@@ -161,9 +161,9 @@ CONFIGURE_FLAGS=(
   --cross-compiling
   --shared
   --without-corepack
-  --v8-disable-temporal-support
 )
-# 不带 --without-npm：npm 文件集是本门产物（任务书 §1；先例带该参是因其不要 npm）
+# 不带 --without-npm：npm 文件集是本门产物（任务书 §1；先例带该参是因其不要 npm）；
+# 不带 --v8-disable-temporal-support：v24.22.3 无此开关（透传 gyp 硬红，见文件头注）
 
 log "configure：${CONFIGURE_FLAGS[*]}（CC=$CC CXX=$CXX，均含 -fno-emulated-tls）"
 {
@@ -316,7 +316,7 @@ json.dump({
                   'sdkSha256': '6bf6ae1efe8de0e8bd15ddbd7fac58bcb54d9620262a541b9b219439317a4c42',
                   'clangVersion': clang_v,
                   'configureFlags': ['--dest-cpu=arm64', '--cross-compiling', '--shared',
-                                     '--without-corepack', '--v8-disable-temporal-support'],
+                                     '--without-corepack'],
                   'ccExtraFlags': ['-fno-emulated-tls']},
     'artifacts': {'libnode.so': {'bytes': int(b_lib), 'sha256': ''},
                   'npm-fileset.tar.gz': {'bytes': int(b_npm), 'sha256': '', 'fileCount': int(fc)},
