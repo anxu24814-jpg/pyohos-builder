@@ -286,6 +286,38 @@ PYEOF3
 # CC 值做单可执行处理，直接内联参数有解析风险——build-cpython-ohos.sh:93-106 包装器
 # 思路同源）；包装器 exec SDK 官方 wrapper（内联 --target/--sysroot/-D__MUSL__，
 # build-native-deps.sh:62-63）再追加 -fno-emulated-tls。
+#
+# ---- 门0补丁4（run 44788351099 实锤 + 本机 OHOS clang 15.0.4 验证）----
+# V8 13.6 的 vector.h:296 用 C++23 的 std::make_unique_for_overwrite（P1132）——OHOS
+# libc++ (clang15) 与 runner libstdc++ (gcc13) 均未提供。修 = 全局 compat 头经 -include
+# 注入两处工具链：①目标侧 CXX 包装器；②显式 CXX_host 包装器（host 工具链同样缺此件，
+# 且此前未显式设 CXX_host 存在 host 工具被 OHOS clang 接管成 aarch64、后续 mksnapshot
+# 执行撞 exec-format 墙的隐患）。特性宏守卫，新工具链原生在场时整块跳过防撞车。
+COMPAT_H="$OUT_DIR/cc-wrappers/compat.h"
+mkdir -p "$OUT_DIR/cc-wrappers"
+cat > "$COMPAT_H" <<'COMPATEOF'
+// NODE-OHOS GATE0 PATCH4: C++23 std::make_unique_for_overwrite shim (P1132)
+// V8 13.6 vector.h 使用之；OHOS libc++ (clang15) 与 runner libstdc++ (gcc13) 均未提供。
+#ifndef NODE_OHOS_COMPAT_H
+#define NODE_OHOS_COMPAT_H
+#include <memory>
+#include <type_traits>
+#if !defined(__cpp_lib_make_unique_for_overwrite) || __cpp_lib_make_unique_for_overwrite < 202102L
+namespace std {
+template <class T>
+std::enable_if_t<!std::is_array_v<T>, std::unique_ptr<T>>
+make_unique_for_overwrite() { return std::unique_ptr<T>(new T); }
+template <class T>
+std::enable_if_t<std::is_unbounded_array_v<T>, std::unique_ptr<T>>
+make_unique_for_overwrite(std::size_t n) {
+  return std::unique_ptr<T>(new std::remove_extent_t<T>[n]);
+}
+}  // namespace std
+#endif
+#endif  // NODE_OHOS_COMPAT_H
+COMPATEOF
+echo "门0补丁4：compat.h（make_unique_for_overwrite shim）已写入 $COMPAT_H" | tee -a "$OUT_DIR/build-log.txt"
+
 WRAP_DIR="$OUT_DIR/cc-wrappers"
 mkdir -p "$WRAP_DIR"
 cat > "$WRAP_DIR/ohos-node-cc" <<EOF
@@ -294,11 +326,17 @@ exec "$CLANG" -fno-emulated-tls "\$@"
 EOF
 cat > "$WRAP_DIR/ohos-node-cxx" <<EOF
 #!/usr/bin/env bash
-exec "$CLANGXX" -fno-emulated-tls "\$@"
+exec "$CLANGXX" -fno-emulated-tls -include "$COMPAT_H" "\$@"
 EOF
-chmod +x "$WRAP_DIR/ohos-node-cc" "$WRAP_DIR/ohos-node-cxx"
+# host 工具链：宿主 c++ + 同一 compat 头（x86_64 本机编译，供 mksnapshot 等可执行件）
+cat > "$WRAP_DIR/ohos-host-cxx" <<EOF
+#!/usr/bin/env bash
+exec c++ -include "$COMPAT_H" "\$@"
+EOF
+chmod +x "$WRAP_DIR/ohos-node-cc" "$WRAP_DIR/ohos-node-cxx" "$WRAP_DIR/ohos-host-cxx"
 export CC="$WRAP_DIR/ohos-node-cc"
 export CXX="$WRAP_DIR/ohos-node-cxx"
+export CXX_host="$WRAP_DIR/ohos-host-cxx"
 
 CONFIGURE_FLAGS=(
   --dest-cpu=arm64
@@ -497,6 +535,9 @@ json.dump({
         {'file': 'node.gyp',
          'change': "linux+clang 分支 libraries 去 -latomic（musl sysroot 无此库）",
          'reason': "目标侧链接 nop/overlapped-checker 报 ld.lld unable to find -latomic（run 44786163438 实锤，2026-11-21）"},
+        {'file': '(不落源码) cc-wrappers/compat.h 经 -include 注入目标 CXX 与 CXX_host',
+         'change': "std::make_unique_for_overwrite shim（C++23 P1132，特性宏守卫）",
+         'reason': "V8 13.6 vector.h:296 使用之，OHOS libc++ 与 runner libstdc++ 均缺（run 44788351099 实锤 + 本机验证，2026-11-21）"},
     ],
     'licenses': {'node': 'MIT', 'npm': 'Artistic-2.0',
                  'npmDepsManifest': 'evidence/license-manifest.json'},
