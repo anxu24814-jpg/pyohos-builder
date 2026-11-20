@@ -1,0 +1,149 @@
+# 门 0 构建工厂 workflow：GitHub Actions ubuntu-24.04 交叉编译 Node v24.22.3 → OHOS aarch64
+# 的 libnode.so（--shared 嵌入形态）+ npm 文件集 + 嵌入头文件集。
+# 部署位置（GitHub 构建仓 anxu24814-jpg/pyohos-builder）：.github/workflows/build-node.yml
+# （脚本本体在仓内 factory/ 下）。任务书：docs/任务书-鸿蒙Node运行时门0-20261121.md §4 U2.2。
+#
+# ── SDK 取版理由（一行）────────────────────────────────────────────────────
+# API 26 的 Linux SDK 无公开直链（repo.huaweicloud.com/openharmony/os/ 最高 7.0-Release），
+# 取 OpenHarmony 7.0-Release 带日期版 ohos-sdk-windows_linux-public_20260829.tar.gz——与
+# Python 工厂同款同缓存 key（同仓命中，build.yml:5-17 决策留档），交叉编译只消费 native 侧
+# clang/lld + musl sysroot，不触 ArkTS 面；runner 侧 llvm 版本由探针步实证，clang 过低编不过
+# V8 按任务书 §5 止损线处理（换 SDK = 指挥级裁定）。
+#
+# ── doctor 结论（lzzhij/ohos-node-doctor，MIT，2026-11-21 引入研读）──────────
+# doctor 是「工程产物体检工具」而非 SDK 体检工具（README:10 明言零依赖、不需 LLVM/DevEco），
+# 无 llvm 目录布局预期与 clang 版本线判据，与 §1 SDK 裁定无冲突；其可用判据已并入校验步：
+# ①ELF 三命令（readelf -h 期望 Type: DYN / -l 期望 INTERP=0 / -d 期望 NEEDED 含
+# libc++_shared.so，README:149-155）；②NEEDED 系统库白名单（ohos-node-doctor.mjs:219，
+# 含 libz.so/libhilog.so/ld-linux-aarch64.so.1，已并入脚本白名单）；
+# ③libc++_shared.so 供给路径 = native/llvm/lib/aarch64-linux-ohos/（ohos-node-doctor.mjs:225，
+# 探针步回显在场性）。lzzhij 先例的「llvm-19 布局」出自 harmonyos-node-notes 而非 doctor，
+# 探针步按 llvm/ 与 llvm-*/ 两形态自适应。
+#
+# ── 预算注（Actions 单 job 90 分钟限额；拆两 job 防 90 分钟墙）──────────────
+# sdk-warm：只做 SDK 下载+缓存预热，必绿，首轮 ~10 分钟（3.42GB 下载 + 解压 linux 侧 native）；
+# build-node：needs sdk-warm，缓存命中后纯构建预算 40~70 分钟（make -j$(nproc) 编 V8 13.6），
+# timeout 85 分钟；runner 内存 16GB（2026-11 公开口径）远超 node BUILDING.md 的 8GB 线，
+# OOM 风险低；磁盘 ~14GB 可用（SDK 3-4GB 缓存 + node 源码/构建树 3-6GB + npm tar ~80MB）。
+name: build-node-ohos
+
+# dispatch-only：防 factory/** 推送误触发全量重跑（build.yml:27-30 同理，任务书 §4 U2.2）
+on:
+  workflow_dispatch:
+
+env:
+  SDK_URL: https://repo.huaweicloud.com/openharmony/os/7.0-Release/ohos-sdk-windows_linux-public_20260829.tar.gz
+  SDK_SHA256: 6bf6ae1efe8de0e8bd15ddbd7fac58bcb54d9620262a541b9b219439317a4c42
+  SDK_FILENAME: ohos-sdk-windows_linux-public_20260829.tar.gz
+  NODE_VERSION: '24.22.3'
+
+jobs:
+  # ── job 1：SDK 下载 + 缓存预热（必绿；缓存 key 与 Python 工厂同款，同仓命中）──
+  sdk-warm:
+    runs-on: ubuntu-24.04   # 钉版本：ubuntu-latest 漂移坑实锤（变更记录 2191 节）
+    timeout-minutes: 20
+    steps:
+      - name: Restore OHOS SDK cache
+        id: sdk
+        uses: actions/cache@v4
+        with:
+          path: ~/ohos-sdk-native
+          key: ohos-sdk-native-${{ env.SDK_FILENAME }}
+
+      - name: Download and extract OHOS SDK (linux native)
+        if: steps.sdk.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          cd "$RUNNER_TEMP"
+          # 3.42GB 下载：-C - 断点续传 + --retry（build.yml:59-76 同款抄）
+          curl -C - --retry 3 --retry-delay 10 -o "$SDK_FILENAME" "$SDK_URL"
+          echo "$SDK_SHA256  $SDK_FILENAME" | sha256sum -c -
+          tar -xzf "$SDK_FILENAME"
+          rm -f "$SDK_FILENAME"
+          # 包结构：外层 tar 解出 ohos-sdk/{linux,windows}/，构建只需要 linux 侧 native
+          cd ohos-sdk/linux
+          unzip -q native-linux-x64-*.zip
+          rm -f ./*.zip
+          mv native "$HOME/ohos-sdk-native"
+          # 装完即删，控磁盘峰值
+          cd "$RUNNER_TEMP" && rm -rf ohos-sdk
+
+      - name: Report SDK cache state
+        run: |
+          set -euo pipefail
+          ls "$HOME/ohos-sdk-native"
+          du -sh "$HOME/ohos-sdk-native"
+
+  # ── job 2：取源码 + 调 factory/build-node-ohos.sh（探针/configure/make/产物/校验）──
+  build-node:
+    needs: sdk-warm
+    runs-on: ubuntu-24.04
+    timeout-minutes: 85
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore OHOS SDK cache
+        id: sdk
+        uses: actions/cache@v4
+        with:
+          path: ~/ohos-sdk-native
+          key: ohos-sdk-native-${{ env.SDK_FILENAME }}
+      # sdk-warm 已保证缓存必命中；未命中（罕见并发逐出）时此处重走同款下载步兜底
+      - name: Download and extract OHOS SDK (linux native, fallback)
+        if: steps.sdk.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          cd "$RUNNER_TEMP"
+          curl -C - --retry 3 --retry-delay 10 -o "$SDK_FILENAME" "$SDK_URL"
+          echo "$SDK_SHA256  $SDK_FILENAME" | sha256sum -c -
+          tar -xzf "$SDK_FILENAME"
+          rm -f "$SDK_FILENAME"
+          cd ohos-sdk/linux
+          unzip -q native-linux-x64-*.zip
+          rm -f ./*.zip
+          mv native "$HOME/ohos-sdk-native"
+          cd "$RUNNER_TEMP" && rm -rf ohos-sdk
+
+      - name: Fetch Node source v24.22.3
+        run: |
+          set -euxo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cd "$RUNNER_TEMP"
+          curl -C - --retry 3 --retry-delay 10 \
+            -O "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}.tar.gz"
+          # 官方 SHASUMS256.txt 校验 + sha256 留档（进 manifest.source.sha256）
+          curl -fL --retry 3 -O "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"
+          grep " node-v${NODE_VERSION}.tar.gz\$" SHASUMS256.txt | sha256sum -c -
+          awk "/node-v${NODE_VERSION}.tar.gz\$/{print \$1}" SHASUMS256.txt \
+            > "$GITHUB_WORKSPACE/out/node-src.sha256"
+          tar -xzf "node-v${NODE_VERSION}.tar.gz"
+          mv "node-v${NODE_VERSION}" "$GITHUB_WORKSPACE/node-src"
+          # 防 tag 错包：版本三行回显（任务书 §4 U2.2.c）
+          grep -E '#define NODE_(MAJOR|MINOR|PATCH)_VERSION' \
+            "$GITHUB_WORKSPACE/node-src/src/node_version.h"
+
+      - name: Build Node v24.22.3 (libnode.so shared) for OHOS aarch64
+        run: |
+          set -euxo pipefail
+          SDK_NATIVE="$HOME/ohos-sdk-native" \
+          NODE_SRC="$GITHUB_WORKSPACE/node-src" \
+          OUT_DIR="$GITHUB_WORKSPACE/out" \
+          NODE_TARBALL_SHA256="$(awk '{print $1}' "$GITHUB_WORKSPACE/out/node-src.sha256")" \
+          bash factory/build-node-ohos.sh
+
+      # 失败轮也上传（if: always()）：out/ 下至少有探针件 node-build-env.txt / build-log.txt
+      # 与 logs/，供失败归因；成功轮为总 tar + 散件。if-no-files-found: error（§3 同款）。
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-ohos-24.22.3-aarch64-g1
+          path: |
+            out/node-ohos-24.22.3-aarch64-g1.tar.gz
+            out/manifest.json
+            out/build-log.txt
+            out/node-build-env.txt
+            out/logs/
+          retention-days: 30
+          if-no-files-found: error
