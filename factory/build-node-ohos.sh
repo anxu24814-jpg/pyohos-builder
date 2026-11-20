@@ -334,18 +334,47 @@ for a in "\$@"; do
 done
 exec "$CLANGXX" -fno-emulated-tls "\$@"
 EOF
-# host 工具链：宿主 c++ + 同一 compat 头（x86_64 本机编译，供 mksnapshot 等可执行件）；
-# 同款 -c 门控（configure 对 host 编译器也跑 -E 探针）
-cat > "$WRAP_DIR/ohos-host-cxx" <<EOF
+# host 工具链：宿主 cc/c++ + 同一 compat 头（x86_64 本机编译，供 mksnapshot 等可执行件）；
+# 同款 -c 门控（configure 对 host 编译器也跑 -E 探针）+ **target 旗过滤器**——gyp 的
+# target_arch=="arm64" 条件旗（-mbranch-protection 等）会泄进 host 编译（toolset 无关、
+# 全局条件），x86 gcc 不认（run 44792901291 实锤）；顺带证实补丁4 前 host 工具一直被
+# OHOS clang 接管成 aarch64（能吃 arm 旗但产物不可执行，mksnapshot 必挂 exec-format）。
+cat > "$WRAP_DIR/ohos-host-cxx" <<'HOSTEOF'
 #!/usr/bin/env bash
-for a in "\$@"; do
-  case "\$a" in -c) exec c++ -include "$COMPAT_H" "\$@";; esac
+# node-ohos host CXX 包装器：①剥 target 侧旗（AArch64 专用，x86 gcc 不认）②真编译注入 compat.h
+COMPAT="__COMPAT_PATH__"
+args=()
+saw_c=0
+for a in "$@"; do
+  case "$a" in
+    -mbranch-protection=*|-march=armv8*) ;;        # target 旗，host 剥除
+    -fno-emulated-tls) ;;                          # target 侧 TLS 形态旗，host 剥除
+    *) args+=("$a"); [ "$a" = "-c" ] && saw_c=1 ;;
+  esac
 done
-exec c++ "\$@"
-EOF
+if [ "$saw_c" = "1" ]; then
+  exec c++ -include "$COMPAT" "${args[@]}"
+fi
+exec c++ "${args[@]}"
+HOSTEOF
+sed -i "s|__COMPAT_PATH__|$COMPAT_H|" "$WRAP_DIR/ohos-host-cxx"
+cat > "$WRAP_DIR/ohos-host-cc" <<'HOSTCCEOF'
+#!/usr/bin/env bash
+# node-ohos host CC 包装器：剥 target 侧旗（同 ohos-host-cxx；C 编译无需 compat 头）
+args=()
+for a in "$@"; do
+  case "$a" in
+    -mbranch-protection=*|-march=armv8*|-fno-emulated-tls) ;;
+    *) args+=("$a") ;;
+  esac
+done
+exec cc "${args[@]}"
+HOSTCCEOF
+chmod +x "$WRAP_DIR/ohos-host-cxx" "$WRAP_DIR/ohos-host-cc"
 chmod +x "$WRAP_DIR/ohos-node-cc" "$WRAP_DIR/ohos-node-cxx" "$WRAP_DIR/ohos-host-cxx"
 export CC="$WRAP_DIR/ohos-node-cc"
 export CXX="$WRAP_DIR/ohos-node-cxx"
+export CC_host="$WRAP_DIR/ohos-host-cc"
 export CXX_host="$WRAP_DIR/ohos-host-cxx"
 
 CONFIGURE_FLAGS=(
