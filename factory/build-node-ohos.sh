@@ -137,28 +137,32 @@ cat "$OUT_DIR/node-build-env.txt"
 log "node 源码版本头："
 grep -E '#define NODE_(MAJOR|MINOR|PATCH)_VERSION' "$NODE_SRC/src/node_version.h" | tee -a "$OUT_DIR/build-log.txt"
 
-# ---- 门0补丁1（run 44778328727 实锤 + 本机 clang 15.0.4 复现）----
+# ---- 门0补丁1（run 44778328727 实锤 + 本机 clang 15.0.4 复现；run 44779847011 修条件判据）----
 # OHOS clang 15 不认 target("arch=armv8-a+aes+crc") 属性串（警告后忽略）→ CRC 内建在无 +crc
 # 特性位的函数上发出 → 后端 "Cannot select: intrinsic %llvm.aarch64.crc32b" = ICE（exit 70）。
-# 修 = zlib_arm_crc32 目标的 -march=armv8-a+aes+crc cflags 条件从「非 win 且非 clang」放开到
-# openharmony（gyp 自带同款非 clang 路径，zlib.gyp:72-74）——逐目标生效，不污染全局 march
+# 修 = zlib_arm_crc32 目标的 -march=armv8-a+aes+crc cflags 条件从「非 win 且非 clang」改为
+# 「非 win 且 arm64」（gyp 自带同款 gcc 路径，zlib.gyp:72-74）——逐目标生效，不污染全局 march
 # （全局 +crc 会放出基线 armv8 设备不可执行的指令，禁）。本机已验证：同 flags 下
-# 「属性被忽略 + 全局 -march=armv8-a+crc+aes」可编译出 .o（2026-11-21 /d/temp/zlib-probe）。
-log "门0补丁1：zlib_arm_crc32 目标 cflags 对 OHOS clang 放开"
+# 「属性被忽略 + -march=armv8-a+crc+aes」可编译出 .o（2026-11-21 /d/temp/zlib-probe）。
+# 三轮教训：条件判据勿依赖 gyp 的 OS 值——OHOS 性来自编译器 triple，gyp 层 OS=linux，
+# `OS=="openharmony"` 永不命中（run 44779847011 实锤）；target_arch=="arm64" 才稳定可用。
+log "门0补丁1：zlib_arm_crc32 目标 cflags 条件改为 target_arch 判据"
 python3 - "$NODE_SRC/deps/zlib/zlib.gyp" <<'PYEOF' | tee -a "$OUT_DIR/build-log.txt"
 import sys
 p = sys.argv[1]
 s = open(p, encoding='utf-8').read()
 old = """'OS!="win" and clang==0', {"""
-new = """'OS!="win" and clang==0 or OS=="openharmony"', {"""
+new = """'OS!="win" and target_arch=="arm64"', {"""
 n = s.count(old)
 if n != 1:
     print(f"错误：zlib.gyp 条件串命中 {n} 次（预期恰 1），补丁不落地。")
     sys.exit(1)
 open(p, 'w', encoding='utf-8').write(s.replace(old, new))
-print("补丁已落地：zlib_arm_crc32 cflags 条件放开到 openharmony（-march=armv8-a+aes+crc）")
+print("补丁已落地：zlib_arm_crc32 cflags 条件 = 非 win 且 arm64（-march=armv8-a+aes+crc）")
 PYEOF
-# 同族风险探查：全 deps 树还有多少 arch=armv8 属性位（不设闸，只回显——后续若再 ICE 按此归因）
+# 同族风险探查：全 deps 树还有多少 arch=armv8 属性位（不设闸，只回显——后续若再 ICE 按此归因）。
+# 已核：v8_zlib 目标源清单只编 crc32.c 软件路径，deps/v8/third_party/zlib/crc32_simd.c
+# 不在 node 构建图（tools/v8_gypfiles/v8.gyp v8_zlib sources 实查），无需补丁。
 echo "---- deps 树内 target(\"arch=armv8 属性位探查（前 10 处）----" | tee -a "$OUT_DIR/build-log.txt"
 grep -rn 'target("arch=armv8' "$NODE_SRC/deps" --include='*.c' --include='*.cc' --include='*.h' 2>/dev/null | head -10 | tee -a "$OUT_DIR/build-log.txt" || true
 
@@ -204,6 +208,21 @@ log "configure：${CONFIGURE_FLAGS[*]}（CC=$CC CXX=$CXX，均含 -fno-emulated-
   echo "---- configure.log 尾 40 行 ----" >> "$OUT_DIR/build-log.txt"
   tail -40 "$LOGS/configure.log" >> "$OUT_DIR/build-log.txt"
 )
+
+# 补丁生效自检（run 44779847011 教训：gyp OS 值不可依赖，提前止损不烧长轮）——
+# configure 生成的 makefile 里 zlib_arm_crc32 必须带上 -march，否则补丁条件未命中。
+{
+  echo "---- gyp 变量实值（out/config.gypi 节选）----"
+  grep -E "'(OS|target_arch)'%?:" "$NODE_SRC/out/config.gypi" | head -4
+  echo "---- 生成物中 -march=armv8-a+aes+crc 命中文件（前 3）----"
+  grep -rl 'armv8-a+aes+crc' "$NODE_SRC/out" 2>/dev/null | head -3
+} >> "$OUT_DIR/build-log.txt"
+MARCH_HIT="$(grep -rl 'armv8-a+aes+crc' "$NODE_SRC/out" 2>/dev/null | head -1 || true)"
+if [ -z "$MARCH_HIT" ]; then
+  echo "错误：-march=armv8-a+aes+crc 未进 configure 生成物（补丁条件未命中——查上方 config.gypi 的 OS/target_arch 实值后修条件），提前止损。" >&2
+  exit 1
+fi
+log "补丁生效自检过：march 旗已进生成物（$MARCH_HIT）"
 
 log "make -j$(nproc)（先例原样；预算 40~70 分钟）；构建前磁盘：$(df -h "$OUT_DIR" | tail -1 | awk '{print "avail="$4}')"
 make -C "$NODE_SRC" -j"$(nproc)" > "$LOGS/build.log" 2>&1
@@ -349,8 +368,8 @@ json.dump({
                   'include-embed.tar.gz': {'bytes': int(b_inc), 'sha256': ''}},
     'patches': [
         {'file': 'deps/zlib/zlib.gyp',
-         'change': "zlib_arm_crc32 目标 -march=armv8-a+aes+crc cflags 条件放开到 openharmony（原仅非 clang 路径）",
-         'reason': "OHOS clang 15 忽略 target(\"arch=armv8-a+aes+crc\") 属性致 CRC 内建后端不可选 ICE（run 44778328727 实锤 + 本机 clang 15.0.4 复现，2026-11-21）"},
+         'change': "zlib_arm_crc32 目标 -march=armv8-a+aes+crc cflags 条件改为「非 win 且 arm64」（原仅 gcc 路径；两轮迭代：OS==openharmony 判据因 gyp 层 OS=linux 不命中，改 target_arch）",
+         'reason': "OHOS clang 15 忽略 target(\"arch=armv8-a+aes+crc\") 属性致 CRC 内建后端不可选 ICE（run 44778328727/44779847011 实锤 + 本机 clang 15.0.4 复现，2026-11-21）"},
     ],
     'licenses': {'node': 'MIT', 'npm': 'Artistic-2.0',
                  'npmDepsManifest': 'evidence/license-manifest.json'},
