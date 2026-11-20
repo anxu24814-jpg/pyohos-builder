@@ -326,12 +326,22 @@ exec "$CLANG" -fno-emulated-tls "\$@"
 EOF
 cat > "$WRAP_DIR/ohos-node-cxx" <<EOF
 #!/usr/bin/env bash
-exec "$CLANGXX" -fno-emulated-tls -include "$COMPAT_H" "\$@"
+# 补丁4注入形态：仅真编译（args 含 -c）才 -include compat.h——configure 探针用 -E -P
+# 预处理宏清单，-include 会把头展开塞进探针输出污染版本 token（run 44791951794 实锤
+# ValueError int('clang')）；链接步亦无需 include。
+for a in "\$@"; do
+  case "\$a" in -c) exec "$CLANGXX" -fno-emulated-tls -include "$COMPAT_H" "\$@";; esac
+done
+exec "$CLANGXX" -fno-emulated-tls "\$@"
 EOF
-# host 工具链：宿主 c++ + 同一 compat 头（x86_64 本机编译，供 mksnapshot 等可执行件）
+# host 工具链：宿主 c++ + 同一 compat 头（x86_64 本机编译，供 mksnapshot 等可执行件）；
+# 同款 -c 门控（configure 对 host 编译器也跑 -E 探针）
 cat > "$WRAP_DIR/ohos-host-cxx" <<EOF
 #!/usr/bin/env bash
-exec c++ -include "$COMPAT_H" "\$@"
+for a in "\$@"; do
+  case "\$a" in -c) exec c++ -include "$COMPAT_H" "\$@";; esac
+done
+exec c++ "\$@"
 EOF
 chmod +x "$WRAP_DIR/ohos-node-cc" "$WRAP_DIR/ohos-node-cxx" "$WRAP_DIR/ohos-host-cxx"
 export CC="$WRAP_DIR/ohos-node-cc"
