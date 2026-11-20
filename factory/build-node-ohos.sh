@@ -166,6 +166,101 @@ PYEOF
 echo "---- deps 树内 target(\"arch=armv8 属性位探查（前 10 处）----" | tee -a "$OUT_DIR/build-log.txt"
 grep -rn 'target("arch=armv8' "$NODE_SRC/deps" --include='*.c' --include='*.cc' --include='*.h' 2>/dev/null | head -10 | tee -a "$OUT_DIR/build-log.txt" || true
 
+# ---- 门0补丁2（run 44782745171 实锤 + 本机 clang 15.0.4 复现）----
+# OHOS SDK libc++（clang 15 配套头）缺 C++20 ranges 算法八件（find_if/find_if_not/replace/
+# stable_sort/any_of/all_of/lower_bound/binary_search 全不在，本机逐件探针实证）→ node v24 的
+# deps/ada 42 处 std::ranges:: 调用全红（首错 find_if，stable_sort 级联 lambda 捕获错）。
+# 修 = ada.h 尾部 include 后注入等价 shim（经典算法 + identity 投影；容器入参形态覆盖全部
+# 调用点，唯一投影调用 = ada.cpp:5976 lower_bound 四参式已支持）；__clang_major__<16 守卫，
+# 未来 llvm>=19 工具链整块跳过防重定义。向 std 命名空间注入属冻结工具链构建兜底（登记 manifest）。
+log "门0补丁2：ada.h 注入 ranges 七件 shim"
+python3 - "$NODE_SRC/deps/ada/ada.h" <<'PYEOF2' | tee -a "$OUT_DIR/build-log.txt"
+import sys
+p = sys.argv[1]
+lines = open(p, encoding='utf-8').read().split('\n')
+if any('NODE-OHOS GATE0 PATCH2' in l for l in lines):
+    print("补丁2已在场（幂等跳过）"); sys.exit(0)
+# 插入点 = 首个 std::ranges:: 用点之前的最后一个 #include 之后（ada.h 单头 include 散布，
+# 「最后一个 include」在用点之后会注入太晚——首轮本地验证实锤）
+use_idx = [i for i, l in enumerate(lines) if 'std::ranges::' in l]
+if not use_idx:
+    print("错误：ada.h 内未找到 std::ranges:: 用点（上游结构变化？）"); sys.exit(1)
+first_use = min(use_idx)
+pre_incs = [i for i, l in enumerate(lines[:first_use]) if l.startswith('#include')]
+last_inc = pre_incs[-1] if pre_incs else 0
+shim = '''
+// ===== NODE-OHOS GATE0 PATCH2: std::ranges shim for OHOS SDK libc++ (clang 15) =====
+// OHOS SDK libc++ lacks C++20 ranges algorithms (find_if/find_if_not/replace/stable_sort/
+// any_of/all_of/lower_bound/binary_search all missing, probed 2026-11-21). Equivalent classic
+// implementations below; container-argument forms cover all ada call sites (the only
+// projected call is lower_bound 4-arg at ada.cpp combining-marks lookup). Skipped
+// entirely on clang>=16 where real std::ranges exists (avoid redefinition).
+#if __clang_major__ < 16
+#include <functional>
+namespace std { namespace ranges {
+template <class R, class Pred, class Proj = std::identity>
+auto find_if(R&& r, Pred pred, Proj proj = {}) {
+  using std::begin; using std::end;
+  auto first = begin(r); const auto last = end(r);
+  for (; first != last; ++first)
+    if (std::invoke(pred, std::invoke(proj, *first))) return first;
+  return first;
+}
+template <class R, class Pred, class Proj = std::identity>
+auto find_if_not(R&& r, Pred pred, Proj proj = {}) {
+  using std::begin; using std::end;
+  auto first = begin(r); const auto last = end(r);
+  for (; first != last; ++first)
+    if (!std::invoke(pred, std::invoke(proj, *first))) return first;
+  return first;
+}
+template <class R, class Pred, class Proj = std::identity>
+bool any_of(R&& r, Pred pred, Proj proj = {}) {
+  using std::begin; using std::end;
+  for (auto first = begin(r), last = end(r); first != last; ++first)
+    if (std::invoke(pred, std::invoke(proj, *first))) return true;
+  return false;
+}
+template <class R, class Pred, class Proj = std::identity>
+bool all_of(R&& r, Pred pred, Proj proj = {}) {
+  using std::begin; using std::end;
+  for (auto first = begin(r), last = end(r); first != last; ++first)
+    if (!std::invoke(pred, std::invoke(proj, *first))) return false;
+  return true;
+}
+template <class R, class T, class U>
+void replace(R&& r, const T& old_value, const U& new_value) {
+  using std::begin; using std::end;
+  for (auto it = begin(r), e = end(r); it != e; ++it)
+    if (*it == old_value) *it = new_value;
+}
+template <class R, class Comp = std::less<>, class Proj = std::identity>
+void stable_sort(R&& r, Comp comp = {}, Proj proj = {}) {
+  using std::begin; using std::end;
+  std::stable_sort(begin(r), end(r), [&](auto&& a, auto&& b) {
+    return std::invoke(comp, std::invoke(proj, a), std::invoke(proj, b));
+  });
+}
+template <class R, class T, class Comp = std::less<>, class Proj = std::identity>
+auto lower_bound(R&& r, const T& value, Comp comp = {}, Proj proj = {}) {
+  using std::begin; using std::end;
+  return std::lower_bound(begin(r), end(r), value, [&](const auto& a, const auto& b) {
+    return std::invoke(comp, std::invoke(proj, a), b);
+  });
+}
+template <class R, class T>
+bool binary_search(R&& r, const T& value) {
+  using std::begin; using std::end;
+  return std::binary_search(begin(r), end(r), value);
+}
+}}  // namespace std::ranges
+#endif  // __clang_major__ < 16
+// ===== end NODE-OHOS GATE0 PATCH2 ====='''
+lines.insert(last_inc + 1, shim)
+open(p, 'w', encoding='utf-8').write('\n'.join(lines))
+print(f"补丁2已落地：ada.h 第 {last_inc + 1} 行（最后 #include 之后）注入 ranges 七件 shim")
+PYEOF2
+
 # ================= d. configure + make =================
 # CC/CXX 注入：-fno-emulated-tls 编译与链接两处生效。经自建包装器注入（configure.py 对
 # CC 值做单可执行处理，直接内联参数有解析风险——build-cpython-ohos.sh:93-106 包装器
@@ -376,6 +471,9 @@ json.dump({
         {'file': 'deps/zlib/zlib.gyp',
          'change': "zlib_arm_crc32 目标 -march=armv8-a+aes+crc cflags 条件改为「非 win 且 arm64」（原仅 gcc 路径；两轮迭代：OS==openharmony 判据因 gyp 层 OS=linux 不命中，改 target_arch）",
          'reason': "OHOS clang 15 忽略 target(\"arch=armv8-a+aes+crc\") 属性致 CRC 内建后端不可选 ICE（run 44778328727/44779847011 实锤 + 本机 clang 15.0.4 复现，2026-11-21）"},
+        {'file': 'deps/ada/ada.h',
+         'change': "首个 ranges 用点前的 include 块后注入 std::ranges 八件等价 shim（find_if/find_if_not/replace/stable_sort/any_of/all_of/lower_bound/binary_search，经典算法实现，__clang_major__<16 守卫）",
+         'reason': "OHOS SDK libc++ 缺 C++20 ranges 算法，ada 42 处调用全红（run 44782745171 实锤 + 本机 clang 15.0.4 复现终验通过，2026-11-21）"},
     ],
     'licenses': {'node': 'MIT', 'npm': 'Artistic-2.0',
                  'npmDepsManifest': 'evidence/license-manifest.json'},
