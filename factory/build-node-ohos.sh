@@ -137,6 +137,31 @@ cat "$OUT_DIR/node-build-env.txt"
 log "node 源码版本头："
 grep -E '#define NODE_(MAJOR|MINOR|PATCH)_VERSION' "$NODE_SRC/src/node_version.h" | tee -a "$OUT_DIR/build-log.txt"
 
+# ---- 门0补丁1（run 44778328727 实锤 + 本机 clang 15.0.4 复现）----
+# OHOS clang 15 不认 target("arch=armv8-a+aes+crc") 属性串（警告后忽略）→ CRC 内建在无 +crc
+# 特性位的函数上发出 → 后端 "Cannot select: intrinsic %llvm.aarch64.crc32b" = ICE（exit 70）。
+# 修 = zlib_arm_crc32 目标的 -march=armv8-a+aes+crc cflags 条件从「非 win 且非 clang」放开到
+# openharmony（gyp 自带同款非 clang 路径，zlib.gyp:72-74）——逐目标生效，不污染全局 march
+# （全局 +crc 会放出基线 armv8 设备不可执行的指令，禁）。本机已验证：同 flags 下
+# 「属性被忽略 + 全局 -march=armv8-a+crc+aes」可编译出 .o（2026-11-21 /d/temp/zlib-probe）。
+log "门0补丁1：zlib_arm_crc32 目标 cflags 对 OHOS clang 放开"
+python3 - "$NODE_SRC/deps/zlib/zlib.gyp" <<'PYEOF' | tee -a "$OUT_DIR/build-log.txt"
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+old = """'OS!="win" and clang==0', {"""
+new = """'OS!="win" and clang==0 or OS=="openharmony"', {"""
+n = s.count(old)
+if n != 1:
+    print(f"错误：zlib.gyp 条件串命中 {n} 次（预期恰 1），补丁不落地。")
+    sys.exit(1)
+open(p, 'w', encoding='utf-8').write(s.replace(old, new))
+print("补丁已落地：zlib_arm_crc32 cflags 条件放开到 openharmony（-march=armv8-a+aes+crc）")
+PYEOF
+# 同族风险探查：全 deps 树还有多少 arch=armv8 属性位（不设闸，只回显——后续若再 ICE 按此归因）
+echo "---- deps 树内 target(\"arch=armv8 属性位探查（前 10 处）----" | tee -a "$OUT_DIR/build-log.txt"
+grep -rn 'target("arch=armv8' "$NODE_SRC/deps" --include='*.c' --include='*.cc' --include='*.h' 2>/dev/null | head -10 | tee -a "$OUT_DIR/build-log.txt" || true
+
 # ================= d. configure + make =================
 # CC/CXX 注入：-fno-emulated-tls 编译与链接两处生效。经自建包装器注入（configure.py 对
 # CC 值做单可执行处理，直接内联参数有解析风险——build-cpython-ohos.sh:93-106 包装器
@@ -322,6 +347,11 @@ json.dump({
     'artifacts': {'libnode.so': {'bytes': int(b_lib), 'sha256': ''},
                   'npm-fileset.tar.gz': {'bytes': int(b_npm), 'sha256': '', 'fileCount': int(fc)},
                   'include-embed.tar.gz': {'bytes': int(b_inc), 'sha256': ''}},
+    'patches': [
+        {'file': 'deps/zlib/zlib.gyp',
+         'change': "zlib_arm_crc32 目标 -march=armv8-a+aes+crc cflags 条件放开到 openharmony（原仅非 clang 路径）",
+         'reason': "OHOS clang 15 忽略 target(\"arch=armv8-a+aes+crc\") 属性致 CRC 内建后端不可选 ICE（run 44778328727 实锤 + 本机 clang 15.0.4 复现，2026-11-21）"},
+    ],
     'licenses': {'node': 'MIT', 'npm': 'Artistic-2.0',
                  'npmDepsManifest': 'evidence/license-manifest.json'},
     'build': {'repo': 'anxu24814-jpg/pyohos-builder', 'workflow': 'build-node.yml',
