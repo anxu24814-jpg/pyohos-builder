@@ -180,8 +180,9 @@ log "configure：${CONFIGURE_FLAGS[*]}（CC=$CC CXX=$CXX，均含 -fno-emulated-
   tail -40 "$LOGS/configure.log" >> "$OUT_DIR/build-log.txt"
 )
 
-log "make -j$(nproc)（先例原样；预算 40~70 分钟）"
+log "make -j$(nproc)（先例原样；预算 40~70 分钟）；构建前磁盘：$(df -h "$OUT_DIR" | tail -1 | awk '{print "avail="$4}')"
 make -C "$NODE_SRC" -j"$(nproc)" > "$LOGS/build.log" 2>&1
+log "构建后磁盘：$(df -h "$OUT_DIR" | tail -1 | awk '{print "avail="$4}')（P6 预跑 P2-3 磁盘峰值观测）"
 {
   echo ""
   echo "==== make 日志尾 100 行 ===="
@@ -357,7 +358,8 @@ MACHINE="$(awk '/^ *Machine:/{print $2}' "$OUT_DIR/elf-header.txt")"
 cat "$OUT_DIR/elf-header.txt" >> "$OUT_DIR/build-log.txt"
 
 log "校验 2/4：INTERP 段数 = 0（共享库无解释器段）"
-INTERP_N="$("$READELF" -l "$OUT_DIR/libnode.so" | grep -c INTERP || true)"
+"$READELF" -l "$OUT_DIR/libnode.so" > "$OUT_DIR/program-headers.txt"  # 先落盘：-l 失败由 set -e 自红（防截断形态假绿，P6 预跑 P2-2）
+INTERP_N="$(grep -c INTERP "$OUT_DIR/program-headers.txt" || true)"
 [ "$INTERP_N" = "0" ] || { echo "错误：libnode.so 含 $INTERP_N 个 INTERP 段（PIE 链接形态，红）。" >&2; exit 1; }
 
 log "校验 3/4：node::Start 符号导出（dlsym 目标）"
@@ -373,7 +375,10 @@ fi
 cat "$OUT_DIR/node-start-symbols.txt" >> "$OUT_DIR/build-log.txt"
 
 log "校验 4/4：DT_NEEDED 白名单（含 libc++_shared.so；零绝对路径 / linux-gnu / libstdc++ / libgcc_s）"
-"$READELF" -d "$OUT_DIR/libnode.so" | grep -oP 'Shared library: \[\K[^\]]+' > "$OUT_DIR/needed.txt" || true
+"$READELF" -d "$OUT_DIR/libnode.so" > "$OUT_DIR/dynamic-raw.txt"  # 先落盘：-d 失败由 set -e 自红；防输出格式漂移致提取空表（P6 预跑 P2-1）
+NEEDED_RAW_N="$(grep -c 'Shared library' "$OUT_DIR/dynamic-raw.txt" || true)"
+[ "$NEEDED_RAW_N" -ge 1 ] || { echo "错误：readelf -d 无 Shared library 条目（输出格式漂移或动态段异常，见 dynamic-raw.txt）。" >&2; exit 1; }
+grep -oP 'Shared library: \[\K[^\]]+' "$OUT_DIR/dynamic-raw.txt" > "$OUT_DIR/needed.txt" || true
 cat "$OUT_DIR/needed.txt" >> "$OUT_DIR/build-log.txt"
 grep -qx 'libc++_shared.so' "$OUT_DIR/needed.txt" \
   || { echo "错误：NEEDED 缺 libc++_shared.so（六约束②，主工程包内已有该件）。" >&2; exit 1; }
