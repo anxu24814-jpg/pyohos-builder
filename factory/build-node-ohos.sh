@@ -261,6 +261,26 @@ open(p, 'w', encoding='utf-8').write('\n'.join(lines))
 print(f"补丁2已落地：ada.h 第 {last_inc + 1} 行（最后 #include 之后）注入 ranges 七件 shim")
 PYEOF2
 
+# ---- 门0补丁3（run 44786163438 实锤）----
+# node.gyp:546-549 ['OS=="linux" and clang==1' → libraries:['-latomic']]——gyp 层 OS=linux
+# 必中此条件，而 OHOS musl sysroot 不提供 libatomic（aarch64 原子操作内联 + compiler-rt
+# builtins 兜底，无需 libatomic）→ 目标侧链接 nop/overlapped-checker 时 ld.lld 报
+# unable to find library -latomic。修 = 原位清空该 libraries 项（全 node.gyp 唯一命中）。
+log "门0补丁3：node.gyp 去 -latomic（musl 无此库且不需要）"
+python3 - "$NODE_SRC/node.gyp" <<'PYEOF3' | tee -a "$OUT_DIR/build-log.txt"
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+old = """'libraries': ['-latomic'],"""
+new = """'libraries': [],  # node-ohos GATE0 PATCH3: musl 无 libatomic（aarch64 原子内联），去 -latomic"""
+n = s.count(old)
+if n != 1:
+    print(f"错误：node.gyp -latomic 条目命中 {n} 次（预期恰 1），补丁不落地。")
+    sys.exit(1)
+open(p, 'w', encoding='utf-8').write(s.replace(old, new))
+print("补丁已落地：node.gyp linux+clang 分支去 -latomic")
+PYEOF3
+
 # ================= d. configure + make =================
 # CC/CXX 注入：-fno-emulated-tls 编译与链接两处生效。经自建包装器注入（configure.py 对
 # CC 值做单可执行处理，直接内联参数有解析风险——build-cpython-ohos.sh:93-106 包装器
@@ -474,6 +494,9 @@ json.dump({
         {'file': 'deps/ada/ada.h',
          'change': "首个 ranges 用点前的 include 块后注入 std::ranges 八件等价 shim（find_if/find_if_not/replace/stable_sort/any_of/all_of/lower_bound/binary_search，经典算法实现，__clang_major__<16 守卫）",
          'reason': "OHOS SDK libc++ 缺 C++20 ranges 算法，ada 42 处调用全红（run 44782745171 实锤 + 本机 clang 15.0.4 复现终验通过，2026-11-21）"},
+        {'file': 'node.gyp',
+         'change': "linux+clang 分支 libraries 去 -latomic（musl sysroot 无此库）",
+         'reason': "目标侧链接 nop/overlapped-checker 报 ld.lld unable to find -latomic（run 44786163438 实锤，2026-11-21）"},
     ],
     'licenses': {'node': 'MIT', 'npm': 'Artistic-2.0',
                  'npmDepsManifest': 'evidence/license-manifest.json'},
