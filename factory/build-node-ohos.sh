@@ -211,15 +211,21 @@ log "configure：${CONFIGURE_FLAGS[*]}（CC=$CC CXX=$CXX，均含 -fno-emulated-
 
 # 补丁生效自检（run 44779847011 教训：gyp OS 值不可依赖，提前止损不烧长轮）——
 # configure 生成的 makefile 里 zlib_arm_crc32 必须带上 -march，否则补丁条件未命中。
+# 注意：node 的 config.gypi 落在源码根（out/ 下只有 Makefile 与 *.mk，run 44781349735 实锤）；
+# 观测 grep 一律 2>/dev/null + || true——观测代码不许致命（同轮教训）。
 {
-  echo "---- gyp 变量实值（out/config.gypi 节选）----"
-  grep -E "'(OS|target_arch)'%?:" "$NODE_SRC/out/config.gypi" | head -4
+  echo "---- gyp 变量实值（config.gypi 节选，根优先）----"
+  grep -hE "'(OS|target_arch)'%?:" "$NODE_SRC/config.gypi" "$NODE_SRC/out/config.gypi" 2>/dev/null | head -4 || true
   echo "---- 生成物中 -march=armv8-a+aes+crc 命中文件（前 3）----"
-  grep -rl 'armv8-a+aes+crc' "$NODE_SRC/out" 2>/dev/null | head -3
+  grep -rl 'armv8-a+aes+crc' "$NODE_SRC/out" 2>/dev/null | head -3 || true
 } >> "$OUT_DIR/build-log.txt"
 MARCH_HIT="$(grep -rl 'armv8-a+aes+crc' "$NODE_SRC/out" 2>/dev/null | head -1 || true)"
 if [ -z "$MARCH_HIT" ]; then
   echo "错误：-march=armv8-a+aes+crc 未进 configure 生成物（补丁条件未命中——查上方 config.gypi 的 OS/target_arch 实值后修条件），提前止损。" >&2
+  # 现场取证：zlib_arm_crc32 目标 .mk 里 crc32_simd 的实际编译命令行（定位条件未命中的确定性证据）
+  for MK in "$NODE_SRC"/out/deps/zlib/zlib_arm_crc32.target.mk "$NODE_SRC"/deps/zlib/zlib_arm_crc32.target.mk; do
+    [ -f "$MK" ] && { echo "---- $MK 内 crc32_simd 编译行 ----" >&2; grep -m3 "crc32_simd" "$MK" >&2 || true; }
+  done
   exit 1
 fi
 log "补丁生效自检过：march 旗已进生成物（$MARCH_HIT）"
