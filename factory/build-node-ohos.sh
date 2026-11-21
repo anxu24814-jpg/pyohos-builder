@@ -802,6 +802,65 @@ for rel, old, new in edits:
 print('补丁8已落地：6 处视图改写（9 段）完成')
 PYEOF8
 
+# ---- 门0补丁9（run 44911644273 实锤 value-type.h:701 + 本机编译验证通过）----
+# V8 wasm 强类型索引 TypeIndex 族是聚合（无构造函数），源码用函数式转换 TypeIndex(expr)
+# 与 TypeIndex({x})——靠 C++20 聚合括号初始化（P0960）放行，OHOS clang 15 支持不全报
+# "no matching conversion for functional-style cast"。修 = 开圆改花、配对闭圆改花、
+# 内部零改动（T(x)→T{x}、T({x})→T{{x}}，聚合嵌套初始化所有标准合法、前向兼容）。
+# 全树扫描闭环：真构造恰 31 处 4 文件（wasm-interpreter 24 + runtime 4 + disassembler 2
+# + value-type.h 1）；function-body-decoder-impl.h 的 6 处 ios.TypeIndex(imm,...) 是
+# 成员函数调用非构造，经「前置 . / -> 排除」跳过（2026-11-22 本机替换器误伤后还原 +
+# 原始包 diff 零差异验证）。
+log "门0补丁9：TypeIndex 族聚合括号初始化 31 处改花括号"
+python3 - "$NODE_SRC" <<'PYEOF9' | tee -a "$OUT_DIR/build-log.txt"
+import sys
+root = sys.argv[1]
+names = ['ModuleTypeIndex', 'CanonicalTypeIndex', 'TypeIndex']  # 长名优先
+files = [
+    'deps/v8/src/wasm/value-type.h',
+    'deps/v8/src/wasm/wasm-disassembler.cc',
+    'deps/v8/src/wasm/interpreter/wasm-interpreter.cc',
+    'deps/v8/src/wasm/interpreter/wasm-interpreter-runtime.cc',
+]
+grand = 0
+for rel in files:
+    p = f'{root}/{rel}'
+    s = open(p, encoding='utf-8').read()
+    count = 0
+    for name in names:
+        idx = 0
+        while True:
+            pos = s.find(name + '(', idx)
+            if pos < 0:
+                break
+            prev = s[pos - 1] if pos else ''
+            # 成员调用（ios.TypeIndex( / ptr->TypeIndex(）与标识符邻接均跳过
+            if prev in '.>' or prev.isalnum() or prev == '_':
+                idx = pos + 1
+                continue
+            depth = 0
+            i = pos + len(name)
+            while i < len(s):
+                if s[i] == '(':
+                    depth += 1
+                elif s[i] == ')':
+                    depth -= 1
+                    if depth == 0:
+                        break
+                i += 1
+            if depth != 0:
+                print(f'错误：{rel} 括号不配对'); sys.exit(1)
+            s = s[:pos + len(name)] + '{' + s[pos + len(name) + 1:i] + '}' + s[i + 1:]
+            count += 1
+            idx = pos + len(name) + 1
+    open(p, 'w', encoding='utf-8').write(s)
+    print(f'{rel}: {count} 处')
+    grand += count
+if grand != 31:
+    print(f'错误：合计 {grand} 处 != 预期 31（上游结构变化？）'); sys.exit(1)
+print(f'补丁9已落地：4 文件合计 {grand} 处聚合花括号化')
+PYEOF9
+
 
 CONFIGURE_FLAGS=(
   --dest-cpu=arm64
@@ -1015,6 +1074,9 @@ json.dump({
         {'file': 'src/{util.h,util-inl.h,node_builtins.h,node_builtins.cc,node_options-inl.h,node_options.cc,tracing/agent_legacy.cc}',
          'change': "视图 6 处经典改写（9 段）：elements_view 重载泛型化 std::get<U>、GetBuiltinIds 返回 vector<string>、for_each(subrange|values) 改经典 for、views::split×2 改 find 分割循环",
          'reason': "视图不 shim（需真视图类，改写更稳）；真实调用链 node_builtins.cc:674 兼容验证 + 本机 14/15 文件语法扫 PASS，2026-11-21"},
+        {'file': 'deps/v8/src/wasm/{value-type.h,wasm-disassembler.cc,interpreter/wasm-interpreter.cc,interpreter/wasm-interpreter-runtime.cc}',
+         'change': "TypeIndex 族聚合括号初始化 31 处改花括号（T(x)→T{x}、T({x})→T{{x}}，内部零改动；成员调用 ios.TypeIndex( 经前置排除跳过）",
+         'reason': "OHOS clang 15 对 C++20 聚合括号初始化（P0960）支持不全报 no matching conversion for functional-style cast（run 44911644273 实锤 value-type.h:701 + 本机编译验证通过，全树扫描闭环真构造恰 31 处，2026-11-22）"},
         {'file': 'deps/v8/src/{objects/transitions-inl.h,objects/descriptor-array-inl.h,maglev/maglev-inlining.h}',
          'change': "4 处 std::ranges/std::views 用点改写经典等价形态（二分手写循环×2 + find_if/max_element 两迭代器式）",
          'reason': "OHOS libc++ 15 缺 std::views 与部分 ranges 算法（补丁2 shim 仅注入 ada.h 覆盖不到 V8 头；run 44875780751 实锤 transitions-inl.h:291 + 本机 clang 15.0.4 改写后编译推过改写点，全树扫描闭环 ada 外恰 3 文件 4 处，2026-11-21）"},
