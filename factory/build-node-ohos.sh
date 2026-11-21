@@ -409,6 +409,77 @@ if total != 22:
 print(f'补丁5已落地：5 文件合计 {total} 处 typename')
 PYEOF5
 
+# ---- 门0补丁6（run 44875780751 实锤 + 本机 OHOS clang 15.0.4 验证推过改写点）----
+# V8 自身 3 文件 4 处用 std::ranges/std::views（补丁2 shim 只注入 ada.h，V8 头不带）：
+# transitions-inl.h / descriptor-array-inl.h 的「ranges::lower_bound(views::iota, 投影)」
+# 与 maglev-inlining.h 的 ranges::find_if / max_element。修 = 源级改写经典等价形态
+# （二分手写循环维持 iota-end 解引用安全语义：end=0 时得 0；find_if/max_element 用
+# begin/end 两迭代器式，<algorithm> 已在场）。全树扫描闭环：ada 外 ranges/views 用面
+# 恰 3 文件 4 处（2026-11-21 本机对 v24.22.3 官方包 grep）。
+log "门0补丁6：V8 3 文件 4 处 ranges/views 改写经典等价形态"
+python3 - "$NODE_SRC" <<'PYEOF6' | tee -a "$OUT_DIR/build-log.txt"
+import sys
+root = sys.argv[1]
+edits = [
+    ('deps/v8/src/objects/transitions-inl.h',
+     '''  int i = *std::ranges::lower_bound(std::views::iota(0, end), hash,
+                                    std::less<>(), [&](int i) {
+                                      Tagged<Name> entry = GetKey(i);
+                                      return entry->hash();
+                                    });''',
+     '''  int lo = 0, hi = end;
+  while (lo < hi) {
+    int mid = lo + (hi - lo) / 2;
+    if (GetKey(mid)->hash() < hash) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  int i = lo;'''),
+    ('deps/v8/src/objects/descriptor-array-inl.h',
+     '''  int number = *std::ranges::lower_bound(std::views::iota(0, end), hash,
+                                         std::less<>(), [&](int i) {
+                                           Tagged<Name> entry = GetSortedKey(i);
+                                           return entry->hash();
+                                         });''',
+     '''  int lo = 0, hi = end;
+  while (lo < hi) {
+    int mid = lo + (hi - lo) / 2;
+    if (GetSortedKey(mid)->hash() < hash) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  int number = lo;'''),
+    ('deps/v8/src/maglev/maglev-inlining.h',
+     '''            ? std::ranges::find_if(graph_->inlineable_calls(),
+                                   [](auto* site) { return site != nullptr; })
+            : std::ranges::max_element(
+                  graph_->inlineable_calls(),
+                  [](const MaglevCallSiteInfo* info1,
+                     const MaglevCallSiteInfo* info2) {''',
+     '''            ? std::find_if(graph_->inlineable_calls().begin(),
+                           graph_->inlineable_calls().end(),
+                           [](auto* site) { return site != nullptr; })
+            : std::max_element(
+                  graph_->inlineable_calls().begin(),
+                  graph_->inlineable_calls().end(),
+                  [](const MaglevCallSiteInfo* info1,
+                     const MaglevCallSiteInfo* info2) {'''),
+]
+for rel, old, new in edits:
+    p = f'{root}/{rel}'
+    s = open(p, encoding='utf-8').read()
+    n = s.count(old)
+    if n != 1:
+        print(f'错误：{rel} 命中 {n} 处 != 1（上游结构变化？）'); sys.exit(1)
+    open(p, 'w', encoding='utf-8').write(s.replace(old, new))
+    print(f'{rel}: 改写 OK')
+print('补丁6已落地：3 文件改写完成')
+PYEOF6
+
 CONFIGURE_FLAGS=(
   --dest-cpu=arm64
   --cross-compiling
@@ -612,6 +683,9 @@ json.dump({
         {'file': 'deps/v8/src/{heap/factory-base.cc,heap/factory-base.h,objects/objects.h,objects/ordered-hash-table.cc,objects/ordered-hash-table.h}',
          'change': "22 处依赖返回类型 HandleType<T>::MaybeType 原位补 typename（模板模板参数+requires 形态）",
          'reason': "OHOS clang 15 对 C++20 relaxed typename（P0634）该复杂路径支持不全报 missing typename（run 44865919999 实锤 + 本机 clang 15.0.4 复现终验，全树扫描闭环恰 22 处 5 文件，2026-11-21）"},
+        {'file': 'deps/v8/src/{objects/transitions-inl.h,objects/descriptor-array-inl.h,maglev/maglev-inlining.h}',
+         'change': "4 处 std::ranges/std::views 用点改写经典等价形态（二分手写循环×2 + find_if/max_element 两迭代器式）",
+         'reason': "OHOS libc++ 15 缺 std::views 与部分 ranges 算法（补丁2 shim 仅注入 ada.h 覆盖不到 V8 头；run 44875780751 实锤 transitions-inl.h:291 + 本机 clang 15.0.4 改写后编译推过改写点，全树扫描闭环 ada 外恰 3 文件 4 处，2026-11-21）"},
     ],
     'licenses': {'node': 'MIT', 'npm': 'Artistic-2.0',
                  'npmDepsManifest': 'evidence/license-manifest.json'},
