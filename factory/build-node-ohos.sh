@@ -195,6 +195,9 @@ shim = '''
 // implementations below; container-argument forms cover all ada call sites (the only
 // projected call is lower_bound 4-arg at ada.cpp combining-marks lookup). Skipped
 // entirely on clang>=16 where real std::ranges exists (avoid redefinition).
+// Gate0 patch7 mutual exclusion: when the global ranges shim header is -include'd
+// (it defines NODE_OHOS_RANGES_ALGO_SHIM and provides a superset), skip this block.
+#ifndef NODE_OHOS_RANGES_ALGO_SHIM
 #if __clang_major__ < 16
 #include <functional>
 namespace std { namespace ranges {
@@ -255,6 +258,7 @@ bool binary_search(R&& r, const T& value) {
 }
 }}  // namespace std::ranges
 #endif  // __clang_major__ < 16
+#endif  // NODE_OHOS_RANGES_ALGO_SHIM
 // ===== end NODE-OHOS GATE0 PATCH2 ====='''
 lines.insert(last_inc + 1, shim)
 open(p, 'w', encoding='utf-8').write('\n'.join(lines))
@@ -320,6 +324,133 @@ make_unique_for_overwrite(std::size_t n) {
 COMPATEOF
 echo "门0补丁4：compat.h（make_unique_for_overwrite shim）已写入 $COMPAT_H" | tee -a "$OUT_DIR/build-log.txt"
 
+# ---- 门0补丁7（run 44896391564 暴露 node src ranges 面 + 本机 14/15 文件语法扫验证）----
+# node 自身 src/ 的 ranges/views 用面（构建图内，examples/test 不编）：算法 7 种 23 用点
+# （find/find_if/sort/reverse/for_each/any_of/all_of）+ 视图 6 处（补丁8 改写）。算法走
+# 全局 shim 头（ada 八件投影形态 + 基础形态并集 12 件），经 -include 注入目标侧 CXX——
+# 与补丁2（ada.h 内嵌八件）经 NODE_OHOS_RANGES_ALGO_SHIM 互斥宏防同单元双注入。
+# 守卫 = __cpp_lib_ranges < 202202L（OHOS libc++15 未定义该宏、本机 PASS 序列实证）。
+# host 侧不注入（gcc13 自带真 ranges，且特性宏 gnu++20 下未定义会重载歧义——同补丁4教训）。
+RANGES_H="$OUT_DIR/cc-wrappers/node-ohos-ranges.h"
+cat > "$RANGES_H" <<'RANGESEOF'
+// NODE-OHOS GATE0 PATCH7: std::ranges algorithms shim (classic equivalents)
+// OHOS SDK libc++ (clang 15) lacks C++20 ranges algorithms; node src + ada use
+// them. Injected via -include to target-side CXX wrapper only (host gcc13 has
+// real ranges; and its feature macro is absent in gnu++20 -> redefinition).
+// Feature-macro guarded: toolchains with __cpp_lib_ranges >= 202202L skip all.
+// Mutual-exclusion macro NODE_OHOS_RANGES_ALGO_SHIM also guards ada.h patch2
+// (same-unit double injection would collide).
+#ifndef NODE_OHOS_RANGES_SHIM_H
+#define NODE_OHOS_RANGES_SHIM_H
+#if !defined(__cpp_lib_ranges) || __cpp_lib_ranges < 202202L
+#define NODE_OHOS_RANGES_ALGO_SHIM
+#include <algorithm>
+#include <functional>
+#include <iterator>
+#include <utility>
+
+namespace std { namespace ranges {
+
+// ---- ada.h patch2 八件（投影形态，逐字迁移自已验证 shim）----
+template <class R, class Pred, class Proj = std::identity>
+auto find_if(R&& r, Pred pred, Proj proj = {}) {
+  using std::begin; using std::end;
+  auto first = begin(r); const auto last = end(r);
+  for (; first != last; ++first)
+    if (std::invoke(pred, std::invoke(proj, *first))) return first;
+  return first;
+}
+template <class R, class Pred, class Proj = std::identity>
+auto find_if_not(R&& r, Pred pred, Proj proj = {}) {
+  using std::begin; using std::end;
+  auto first = begin(r); const auto last = end(r);
+  for (; first != last; ++first)
+    if (!std::invoke(pred, std::invoke(proj, *first))) return first;
+  return first;
+}
+template <class R, class Pred, class Proj = std::identity>
+bool any_of(R&& r, Pred pred, Proj proj = {}) {
+  using std::begin; using std::end;
+  auto first = begin(r); const auto last = end(r);
+  for (; first != last; ++first)
+    if (std::invoke(pred, std::invoke(proj, *first))) return true;
+  return false;
+}
+template <class R, class Pred, class Proj = std::identity>
+bool all_of(R&& r, Pred pred, Proj proj = {}) {
+  using std::begin; using std::end;
+  auto first = begin(r); const auto last = end(r);
+  for (; first != last; ++first)
+    if (!std::invoke(pred, std::invoke(proj, *first))) return false;
+  return true;
+}
+template <class R, class T, class U, class Proj = std::identity>
+void replace(R&& r, const T& old_value, const U& new_value, Proj proj = {}) {
+  using std::begin; using std::end;
+  auto first = begin(r); const auto last = end(r);
+  for (; first != last; ++first)
+    if (std::invoke(proj, *first) == old_value) *first = new_value;
+}
+template <class R, class Comp = std::less<>, class Proj = std::identity>
+void stable_sort(R&& r, Comp comp = {}, Proj proj = {}) {
+  using std::begin; using std::end;
+  std::stable_sort(begin(r), end(r), [&](auto&& a, auto&& b) {
+    return std::invoke(comp, std::invoke(proj, a), std::invoke(proj, b));
+  });
+}
+template <class R, class T, class Comp = std::less<>, class Proj = std::identity>
+auto lower_bound(R&& r, const T& value, Comp comp = {}, Proj proj = {}) {
+  using std::begin; using std::end;
+  auto first = begin(r); const auto last = end(r);
+  auto count = std::distance(first, last);
+  while (count > 0) {
+    auto step = count / 2;
+    auto it = std::next(first, step);
+    if (std::invoke(comp, std::invoke(proj, *it), value)) {
+      first = std::next(it);
+      count -= step + 1;
+    } else {
+      count = step;
+    }
+  }
+  return first;
+}
+template <class R, class T, class Comp = std::less<>, class Proj = std::identity>
+bool binary_search(R&& r, const T& value, Comp comp = {}, Proj proj = {}) {
+  auto it = std::ranges::lower_bound(r, value, comp, proj);
+  using std::end;
+  return it != end(r) && !std::invoke(comp, value, std::invoke(proj, *it));
+}
+
+// ---- node src 基础形态 ----
+template <class R, class T>
+auto find(R&& r, const T& value) {
+  using std::begin; using std::end;
+  return std::find(begin(r), end(r), value);
+}
+template <class R, class Comp = std::less<>>
+void sort(R&& r, Comp comp = {}) {
+  using std::begin; using std::end;
+  std::sort(begin(r), end(r), comp);
+}
+template <class R>
+void reverse(R&& r) {
+  using std::begin; using std::end;
+  std::reverse(begin(r), end(r));
+}
+template <class R, class F, class Proj = std::identity>
+void for_each(R&& r, F f, Proj proj = {}) {
+  using std::begin; using std::end;
+  auto first = begin(r); const auto last = end(r);
+  for (; first != last; ++first) f(std::invoke(proj, *first));
+}
+
+}}  // namespace std::ranges
+#endif  // __cpp_lib_ranges
+#endif  // NODE_OHOS_RANGES_SHIM_H
+RANGESEOF
+echo "门0补丁7：node-ohos-ranges.h（算法 12 件 shim）已写入 $RANGES_H" | tee -a "$OUT_DIR/build-log.txt"
+
 WRAP_DIR="$OUT_DIR/cc-wrappers"
 mkdir -p "$WRAP_DIR"
 cat > "$WRAP_DIR/ohos-node-cc" <<EOF
@@ -332,7 +463,7 @@ cat > "$WRAP_DIR/ohos-node-cxx" <<EOF
 # 预处理宏清单，-include 会把头展开塞进探针输出污染版本 token（run 44791951794 实锤
 # ValueError int('clang')）；链接步亦无需 include。
 for a in "\$@"; do
-  case "\$a" in -c) exec "$CLANGXX" -fno-emulated-tls -include "$COMPAT_H" "\$@";; esac
+  case "\$a" in -c) exec "$CLANGXX" -fno-emulated-tls -include "$COMPAT_H" -include "$RANGES_H" "\$@";; esac
 done
 exec "$CLANGXX" -fno-emulated-tls "\$@"
 EOF
@@ -409,6 +540,45 @@ if total != 22:
 print(f'补丁5已落地：5 文件合计 {total} 处 typename')
 PYEOF5
 
+# ---- 门0补丁5续（run 44896391564 实锤 mark-compact.h:344 + 全形态扫描预防 3 处）----
+# P0634 族另一形态：非模板类的成员函数模板里「类模板实例::嵌套类型」作参数/返回/局部声明
+# 无 typename（上游靠 C++20 relaxed typename 放行）。实锤 2 = mark-compact.h/cc 的
+# WeakObjectWorklist<TObjectAndSlot>::Local；预防 3 = turboshaft-graph-interface 的
+# BrTableAnalysis<ValidationTag>::CaseVector、node_platform 的 TaskQueue<T>::PriorityQueue
+# ×2（跨类依赖名同形态必暴露）。全形态扫描闭环（声明位置 X<T>::Y 无 typename 用点人审
+# 28+92 行，真缺仅此 5 处；具体类型实参/已有 typename/类内自身实例化均排除）。
+log "门0补丁5续：依赖名 typename 5 处（实锤 2 + 预防 3）"
+python3 - "$NODE_SRC" <<'PYEOF5B' | tee -a "$OUT_DIR/build-log.txt"
+import sys
+root = sys.argv[1]
+edits = [
+    ('deps/v8/src/heap/mark-compact.h',
+     '      WeakObjects::WeakObjectWorklist<TObjectAndSlot>::Local& worklist,',
+     '      typename WeakObjects::WeakObjectWorklist<TObjectAndSlot>::Local& worklist,'),
+    ('deps/v8/src/heap/mark-compact.cc',
+     '    WeakObjects::WeakObjectWorklist<TObjectAndSlot>::Local& worklist,',
+     '    typename WeakObjects::WeakObjectWorklist<TObjectAndSlot>::Local& worklist,'),
+    ('deps/v8/src/wasm/turboshaft-graph-interface.cc',
+     '                   const BrTableAnalysis<ValidationTag>::CaseVector& cases)',
+     '                   const typename BrTableAnalysis<ValidationTag>::CaseVector& cases)'),
+    ('src/node_platform.cc',
+     'TaskQueue<T>::PriorityQueue TaskQueue<T>::Locked::PopAll() {',
+     'typename TaskQueue<T>::PriorityQueue TaskQueue<T>::Locked::PopAll() {'),
+    ('src/node_platform.cc',
+     '  TaskQueue<T>::PriorityQueue result;',
+     '  typename TaskQueue<T>::PriorityQueue result;'),
+]
+for rel, old, new in edits:
+    p = f'{root}/{rel}'
+    s = open(p, encoding='utf-8').read()
+    n = s.count(old)
+    if n != 1:
+        print(f'错误：{rel} 命中 {n} != 1（上游结构变化？）'); sys.exit(1)
+    open(p, 'w', encoding='utf-8').write(s.replace(old, new))
+    print(f'{rel}: 补 typename OK')
+print('补丁5续已落地：5 处 typename（实锤 2 + 预防 3）')
+PYEOF5B
+
 # ---- 门0补丁6（run 44875780751 实锤 + 本机 OHOS clang 15.0.4 验证推过改写点）----
 # V8 自身 3 文件 4 处用 std::ranges/std::views（补丁2 shim 只注入 ada.h，V8 头不带）：
 # transitions-inl.h / descriptor-array-inl.h 的「ranges::lower_bound(views::iota, 投影)」
@@ -479,6 +649,159 @@ for rel, old, new in edits:
     print(f'{rel}: 改写 OK')
 print('补丁6已落地：3 文件改写完成')
 PYEOF6
+
+# ---- 门0补丁8（node src 视图 6 处经典改写；本机 14/15 文件语法扫 PASS，2026-11-21）----
+# 视图不 shim（elements_view/keys_view/ref_view/subrange/views::split/values/keys 需真视图
+# 类，改写更稳）：util.h+util-inl.h 的 elements_view 重载泛型化（std::get<U> 取元素，
+# 真实调用链 = node_builtins.cc:674 经 GetBuiltinIds 传入）；node_builtins 返回类型改
+# vector<string>（消费点 auto+范围 for 兼容）；node_options-inl 的 for_each(subrange|
+# values) 改经典 for（it->second）；两处 views::split 改经典 find 分割循环（空串时 1 个
+# 空段，与 P2210 语义一致）。
+log "门0补丁8：node src 视图 6 处经典改写（9 段替换）"
+python3 - "$NODE_SRC" <<'PYEOF8' | tee -a "$OUT_DIR/build-log.txt"
+import sys
+root = sys.argv[1]
+edits = [
+    ('src/util.h',
+     '''inline v8::MaybeLocal<v8::Value> ToV8Value(
+    v8::Local<v8::Context> context,
+    const std::ranges::elements_view<T, U>& vec,
+    v8::Isolate* isolate = nullptr);''',
+     '''inline v8::MaybeLocal<v8::Value> ToV8Value(
+    v8::Local<v8::Context> context,
+    const T& vec,
+    v8::Isolate* isolate = nullptr);'''),
+    ('src/util-inl.h',
+     '''v8::MaybeLocal<v8::Value> ToV8Value(v8::Local<v8::Context> context,
+                                    const std::ranges::elements_view<T, U>& vec,
+                                    v8::Isolate* isolate) {''',
+     '''v8::MaybeLocal<v8::Value> ToV8Value(v8::Local<v8::Context> context,
+                                    const T& vec,
+                                    v8::Isolate* isolate) {'''),
+    ('src/util-inl.h',
+     '''    if (!ToV8Value(context, *it, isolate).ToLocal(&arr[i]))
+      return v8::MaybeLocal<v8::Value>();
+    std::advance(it, 1);
+  }
+
+  return handle_scope.Escape(v8::Array::New(isolate, arr.out(), arr.length()));
+}
+
+template <typename T, typename U>
+v8::MaybeLocal<v8::Value> ToV8Value(v8::Local<v8::Context> context,
+                                    const std::unordered_map<T, U>& map,''',
+     '''    if (!ToV8Value(context, std::get<U>(*it), isolate).ToLocal(&arr[i]))
+      return v8::MaybeLocal<v8::Value>();
+    std::advance(it, 1);
+  }
+
+  return handle_scope.Escape(v8::Array::New(isolate, arr.out(), arr.length()));
+}
+
+template <typename T, typename U>
+v8::MaybeLocal<v8::Value> ToV8Value(v8::Local<v8::Context> context,
+                                    const std::unordered_map<T, U>& map,'''),
+    ('src/node_builtins.h',
+     '''  [[nodiscard]] std::ranges::keys_view<
+      std::ranges::ref_view<const BuiltinSourceMap>>
+  GetBuiltinIds() const;''',
+     '''  [[nodiscard]] std::vector<std::string> GetBuiltinIds() const;'''),
+    ('src/node_builtins.cc',
+     '''std::ranges::keys_view<std::ranges::ref_view<const BuiltinSourceMap>>
+BuiltinLoader::GetBuiltinIds() const {
+  return std::views::keys(*source_.read());
+}''',
+     '''std::vector<std::string> BuiltinLoader::GetBuiltinIds() const {
+  auto source = source_.read();
+  std::vector<std::string> ids;
+  ids.reserve(source->size());
+  for (const auto& entry : *source) {
+    ids.push_back(entry.first);
+  }
+  return ids;
+}'''),
+    ('src/node_options-inl.h',
+     '''      auto [f, l] = implications_.equal_range(implied_name);
+      std::ranges::for_each(std::ranges::subrange(f, l) | std::views::values,
+                            [&](const auto& value) {
+                              if (value.type == kV8Option) {
+                                v8_args->push_back(value.name);
+                              } else {
+                                *value.target_field->template Lookup<bool>(
+                                    options) = value.target_value;
+                              }
+                            });''',
+     '''      auto [f, l] = implications_.equal_range(implied_name);
+      for (auto it = f; it != l; ++it) {
+        const auto& value = it->second;
+        if (value.type == kV8Option) {
+          v8_args->push_back(value.name);
+        } else {
+          *value.target_field->template Lookup<bool>(options) =
+              value.target_value;
+        }
+      }'''),
+    ('src/node_options.cc',
+     '''  using std::operator""sv;
+  auto entries = std::views::split(inspect_publish_uid_string, ","sv);
+  inspect_publish_uid.console = false;
+  inspect_publish_uid.http = false;
+  for (const auto& entry : entries) {
+    std::string_view destination(entry.data(), entry.size());''',
+     '''  using std::operator""sv;
+  std::string_view entries_str = inspect_publish_uid_string;
+  inspect_publish_uid.console = false;
+  inspect_publish_uid.http = false;
+  size_t pos = 0;
+  while (pos <= entries_str.size()) {
+    size_t comma = entries_str.find(',', pos);
+    std::string_view destination =
+        entries_str.substr(pos, comma == std::string_view::npos
+                                    ? std::string_view::npos
+                                    : comma - pos);'''),
+    ('src/node_options.cc',
+     '''    } else {
+      errors->emplace_back("--inspect-publish-uid destination can be "
+                           "stderr or http");
+    }''',
+     '''    } else {
+      errors->emplace_back("--inspect-publish-uid destination can be "
+                           "stderr or http");
+    }
+    if (comma == std::string_view::npos) break;
+    pos = comma + 1;'''),
+    ('src/tracing/agent_legacy.cc',
+     '''  using std::operator""sv;
+  auto parts = std::views::split(categories, ","sv);
+
+  std::set<std::string> categories_set;
+  for (const auto& s : parts) {
+    categories_set.emplace(std::string(s.data(), s.size()));
+  }''',
+     '''  std::string_view parts_str = categories;
+  std::set<std::string> categories_set;
+  size_t pos = 0;
+  while (pos <= parts_str.size()) {
+    size_t comma = parts_str.find(',', pos);
+    categories_set.emplace(std::string(
+        parts_str.substr(pos, comma == std::string_view::npos
+                                  ? std::string_view::npos
+                                  : comma - pos)));
+    if (comma == std::string_view::npos) break;
+    pos = comma + 1;
+  }'''),
+]
+for rel, old, new in edits:
+    p = f'{root}/{rel}'
+    s = open(p, encoding='utf-8').read()
+    n = s.count(old)
+    if n != 1:
+        print(f'错误：{rel} 命中 {n} != 1（上游结构变化？）'); sys.exit(1)
+    open(p, 'w', encoding='utf-8').write(s.replace(old, new))
+    print(f'{rel}: 改写 OK')
+print('补丁8已落地：6 处视图改写（9 段）完成')
+PYEOF8
+
 
 CONFIGURE_FLAGS=(
   --dest-cpu=arm64
@@ -683,6 +1006,15 @@ json.dump({
         {'file': 'deps/v8/src/{heap/factory-base.cc,heap/factory-base.h,objects/objects.h,objects/ordered-hash-table.cc,objects/ordered-hash-table.h}',
          'change': "22 处依赖返回类型 HandleType<T>::MaybeType 原位补 typename（模板模板参数+requires 形态）",
          'reason': "OHOS clang 15 对 C++20 relaxed typename（P0634）该复杂路径支持不全报 missing typename（run 44865919999 实锤 + 本机 clang 15.0.4 复现终验，全树扫描闭环恰 22 处 5 文件，2026-11-21）"},
+        {'file': 'deps/v8/src/{heap/mark-compact.h,heap/mark-compact.cc,wasm/turboshaft-graph-interface.cc} + src/node_platform.cc',
+         'change': "5 处依赖名补 typename（实锤 2 = WeakObjectWorklist<T>::Local；预防 3 = BrTableAnalysis<T>::CaseVector / TaskQueue<T>::PriorityQueue×2）",
+         'reason': "P0634 族另一形态（成员函数模板的类模板实例嵌套类型），run 44896391564 实锤 mark-compact.h:344 + 全形态扫描人审 120 行真缺仅 5 处，2026-11-21"},
+        {'file': '(不落源码) cc-wrappers/node-ohos-ranges.h 经 -include 注入目标侧 CXX 包装器（-c 门控，与 compat.h 并列）',
+         'change': "std::ranges 算法 12 件 shim（ada 八件投影形态 + find/sort/reverse/for_each 基础形态），__cpp_lib_ranges<202202L 守卫；ada.h 补丁2 段加 NODE_OHOS_RANGES_ALGO_SHIM 互斥宏防双注入",
+         'reason': "node src 构建图内 ranges 算法用面 7 种 23 用点（run 44896391564 后全树扫描），OHOS libc++ 15 缺；本机 14/15 文件语法扫 PASS（2026-11-21）"},
+        {'file': 'src/{util.h,util-inl.h,node_builtins.h,node_builtins.cc,node_options-inl.h,node_options.cc,tracing/agent_legacy.cc}',
+         'change': "视图 6 处经典改写（9 段）：elements_view 重载泛型化 std::get<U>、GetBuiltinIds 返回 vector<string>、for_each(subrange|values) 改经典 for、views::split×2 改 find 分割循环",
+         'reason': "视图不 shim（需真视图类，改写更稳）；真实调用链 node_builtins.cc:674 兼容验证 + 本机 14/15 文件语法扫 PASS，2026-11-21"},
         {'file': 'deps/v8/src/{objects/transitions-inl.h,objects/descriptor-array-inl.h,maglev/maglev-inlining.h}',
          'change': "4 处 std::ranges/std::views 用点改写经典等价形态（二分手写循环×2 + find_if/max_element 两迭代器式）",
          'reason': "OHOS libc++ 15 缺 std::views 与部分 ranges 算法（补丁2 shim 仅注入 ada.h 覆盖不到 V8 头；run 44875780751 实锤 transitions-inl.h:291 + 本机 clang 15.0.4 改写后编译推过改写点，全树扫描闭环 ada 外恰 3 文件 4 处，2026-11-21）"},
