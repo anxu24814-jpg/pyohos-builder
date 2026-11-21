@@ -525,8 +525,8 @@ if [ -z "$MARCH_HIT" ]; then
 fi
 log "补丁生效自检过：march 旗已进生成物（$MARCH_HIT）"
 
-log "make -j$(nproc)（先例原样；预算 40~70 分钟）；构建前磁盘：$(df -h "$OUT_DIR" | tail -1 | awk '{print "avail="$4}')"
-make -C "$NODE_SRC" -j"$(nproc)" > "$LOGS/build.log" 2>&1
+log "make -j4（显式覆盖 2 核 nproc：-j2 实测 150 分钟未编完，run 44884007284 闸杀；4 并发 cc1plus 峰值 ~8G < 16G 内存）；构建前磁盘：$(df -h "$OUT_DIR" | tail -1 | awk '{print "avail="$4}')"
+make -C "$NODE_SRC" -j4 > "$LOGS/build.log" 2>&1
 log "构建后磁盘：$(df -h "$OUT_DIR" | tail -1 | awk '{print "avail="$4}')（P6 预跑 P2-3 磁盘峰值观测）"
 {
   echo ""
