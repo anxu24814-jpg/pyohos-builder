@@ -376,6 +376,39 @@ export CXX="$WRAP_DIR/ohos-node-cxx"
 export CC_host="$WRAP_DIR/ohos-host-cc"
 export CXX_host="$WRAP_DIR/ohos-host-cxx"
 
+# ---- 门0补丁5（run 44865919999 实锤 + 本机 OHOS clang 15.0.4 复现终验）----
+# V8 13.6 handle 系统在 5 文件里用「模板模板参数 + requires 约束」形态声明返回类型
+# `HandleType<T>::MaybeType`（无 typename）——上游靠 C++20 relaxed typename（P0634）放行，
+# OHOS clang 15 对该复杂路径支持不全报 missing 'typename'（v8_initializers_slow 的
+# js-to-wasm-tq-csa.o 首爆，20 错上限）。修 = 原位补 typename（标准永远合法、前向兼容，
+# 无需特性宏守卫）。全树扫描闭环：恰 22 处、5 文件、无其他别名/模板名变体（2026-11-21
+# 本机对 v24.22.3 官方包全树 grep；MaybeType 全部经 HandleType，参数位置零用点）。
+log "门0补丁5：V8 handle 系 5 文件 22 处依赖返回类型补 typename"
+python3 - "$NODE_SRC" <<'PYEOF5' | tee -a "$OUT_DIR/build-log.txt"
+import re, sys
+root = sys.argv[1]
+files = [
+    'deps/v8/src/heap/factory-base.cc',
+    'deps/v8/src/heap/factory-base.h',
+    'deps/v8/src/objects/objects.h',
+    'deps/v8/src/objects/ordered-hash-table.cc',
+    'deps/v8/src/objects/ordered-hash-table.h',
+]
+pat = re.compile(r'(?<!typename )HandleType<([A-Za-z]+)>::MaybeType')
+total = 0
+for rel in files:
+    p = f'{root}/{rel}'
+    s = open(p, encoding='utf-8').read()
+    s2, n = pat.subn(lambda m: 'typename HandleType<' + m.group(1) + '>::MaybeType', s)
+    if n == 0:
+        print(f'错误：{rel} 零命中（上游结构变化？）'); sys.exit(1)
+    open(p, 'w', encoding='utf-8').write(s2)
+    print(f'{rel}: {n} 处'); total += n
+if total != 22:
+    print(f'错误：合计 {total} 处 != 预期 22（上游结构变化？）'); sys.exit(1)
+print(f'补丁5已落地：5 文件合计 {total} 处 typename')
+PYEOF5
+
 CONFIGURE_FLAGS=(
   --dest-cpu=arm64
   --cross-compiling
@@ -576,6 +609,9 @@ json.dump({
         {'file': '(不落源码) cc-wrappers/compat.h 经 -include 注入目标侧 CXX 包装器（-c 门控）',
          'change': "std::make_unique_for_overwrite shim（C++23 P1132，特性宏守卫）；host 侧不注入（gcc13 自带真函数，注入反致重载歧义）",
          'reason': "V8 13.6 vector.h:296 使用之，目标侧 OHOS libc++ 缺（run 44788351099 实锤）；host 歧义教训 run 44795703343，2026-11-21"},
+        {'file': 'deps/v8/src/{heap/factory-base.cc,heap/factory-base.h,objects/objects.h,objects/ordered-hash-table.cc,objects/ordered-hash-table.h}',
+         'change': "22 处依赖返回类型 HandleType<T>::MaybeType 原位补 typename（模板模板参数+requires 形态）",
+         'reason': "OHOS clang 15 对 C++20 relaxed typename（P0634）该复杂路径支持不全报 missing typename（run 44865919999 实锤 + 本机 clang 15.0.4 复现终验，全树扫描闭环恰 22 处 5 文件，2026-11-21）"},
     ],
     'licenses': {'node': 'MIT', 'npm': 'Artistic-2.0',
                  'npmDepsManifest': 'evidence/license-manifest.json'},
