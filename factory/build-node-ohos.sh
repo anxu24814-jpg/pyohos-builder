@@ -173,7 +173,7 @@ grep -rn 'target("arch=armv8' "$NODE_SRC/deps" --include='*.c' --include='*.cc' 
 # 修 = ada.h 尾部 include 后注入等价 shim（经典算法 + identity 投影；容器入参形态覆盖全部
 # 调用点，唯一投影调用 = ada.cpp:5976 lower_bound 四参式已支持）；__clang_major__<16 守卫，
 # 未来 llvm>=19 工具链整块跳过防重定义。向 std 命名空间注入属冻结工具链构建兜底（登记 manifest）。
-log "门0补丁2：ada.h 注入 ranges 七件 shim"
+log "门0补丁2：ada.h 注入 ranges 八件 shim"
 python3 - "$NODE_SRC/deps/ada/ada.h" <<'PYEOF2' | tee -a "$OUT_DIR/build-log.txt"
 import sys
 p = sys.argv[1]
@@ -258,7 +258,7 @@ bool binary_search(R&& r, const T& value) {
 // ===== end NODE-OHOS GATE0 PATCH2 ====='''
 lines.insert(last_inc + 1, shim)
 open(p, 'w', encoding='utf-8').write('\n'.join(lines))
-print(f"补丁2已落地：ada.h 第 {last_inc + 1} 行（最后 #include 之后）注入 ranges 七件 shim")
+print(f"补丁2已落地：ada.h 第 {last_inc + 1} 行（最后 #include 之后）注入 ranges 八件 shim")
 PYEOF2
 
 # ---- 门0补丁3（run 44786163438 实锤）----
@@ -287,17 +287,19 @@ PYEOF3
 # 思路同源）；包装器 exec SDK 官方 wrapper（内联 --target/--sysroot/-D__MUSL__，
 # build-native-deps.sh:62-63）再追加 -fno-emulated-tls。
 #
-# ---- 门0补丁4（run 44788351099 实锤 + 本机 OHOS clang 15.0.4 验证）----
-# V8 13.6 的 vector.h:296 用 C++23 的 std::make_unique_for_overwrite（P1132）——OHOS
-# libc++ (clang15) 与 runner libstdc++ (gcc13) 均未提供。修 = 全局 compat 头经 -include
-# 注入两处工具链：①目标侧 CXX 包装器；②显式 CXX_host 包装器（host 工具链同样缺此件，
-# 且此前未显式设 CXX_host 存在 host 工具被 OHOS clang 接管成 aarch64、后续 mksnapshot
+# ---- 门0补丁4（run 44788351099 目标侧红实锤；v4 修订 = run 44795703343 host 歧义实锤）----
+# V8 13.6 的 vector.h:296 用 C++23 的 std::make_unique_for_overwrite（P1132）。
+# 仅目标侧缺（OHOS libc++/clang15 无此函数）；host 侧 gcc13 libstdc++ 自带真函数
+# （gnu++20 下特性宏未定义但函数可见——注入 shim 反致重载歧义，故 host 只剥旗不注入）。
+# 修 = compat 头经 -include 注入目标侧 CXX 包装器；CXX_host 另行显式设为宿主 gcc
+# 包装器（此前未显式设存在 host 工具被 OHOS clang 接管成 aarch64、后续 mksnapshot
 # 执行撞 exec-format 墙的隐患）。特性宏守卫，新工具链原生在场时整块跳过防撞车。
 COMPAT_H="$OUT_DIR/cc-wrappers/compat.h"
 mkdir -p "$OUT_DIR/cc-wrappers"
 cat > "$COMPAT_H" <<'COMPATEOF'
 // NODE-OHOS GATE0 PATCH4: C++23 std::make_unique_for_overwrite shim (P1132)
-// V8 13.6 vector.h 使用之；OHOS libc++ (clang15) 与 runner libstdc++ (gcc13) 均未提供。
+// V8 13.6 vector.h 使用之；仅注入目标侧（OHOS libc++/clang15 缺此件；host gcc13
+// 自带真函数且特性宏在 gnu++20 未定义，注入会重载歧义——run 44795703343）。
 #ifndef NODE_OHOS_COMPAT_H
 #define NODE_OHOS_COMPAT_H
 #include <memory>
@@ -334,30 +336,27 @@ for a in "\$@"; do
 done
 exec "$CLANGXX" -fno-emulated-tls "\$@"
 EOF
-# host 工具链：宿主 cc/c++ + 同一 compat 头（x86_64 本机编译，供 mksnapshot 等可执行件）；
-# 同款 -c 门控（configure 对 host 编译器也跑 -E 探针）+ **target 旗过滤器**——gyp 的
+# host 工具链：宿主 cc/c++（x86_64 本机编译，供 mksnapshot 等可执行件），不注入
+# compat 头（gcc13 自带真函数，见补丁4 注释）+ **target 旗过滤器**——gyp 的
 # target_arch=="arm64" 条件旗（-mbranch-protection 等）会泄进 host 编译（toolset 无关、
 # 全局条件），x86 gcc 不认（run 44792901291 实锤）；顺带证实补丁4 前 host 工具一直被
 # OHOS clang 接管成 aarch64（能吃 arm 旗但产物不可执行，mksnapshot 必挂 exec-format）。
 cat > "$WRAP_DIR/ohos-host-cxx" <<'HOSTEOF'
 #!/usr/bin/env bash
-# node-ohos host CXX 包装器：①剥 target 侧旗（AArch64 专用，x86 gcc 不认）②真编译注入 compat.h
-COMPAT="__COMPAT_PATH__"
+# node-ohos host CXX 包装器：剥 target 侧旗（AArch64 专用，x86 gcc 不认）。
+# 不注入 compat.h——gcc13 libstdc++ 自带 make_unique_for_overwrite 真函数，而特性宏
+# __cpp_lib_make_unique_for_overwrite 在 gnu++20 下未定义，注入 shim 反致重载歧义
+# （run 44795703343 实锤 code-generator.cc ambiguous）。
 args=()
-saw_c=0
 for a in "$@"; do
   case "$a" in
     -mbranch-protection=*|-march=armv8*) ;;        # target 旗，host 剥除
     -fno-emulated-tls) ;;                          # target 侧 TLS 形态旗，host 剥除
-    *) args+=("$a"); [ "$a" = "-c" ] && saw_c=1 ;;
+    *) args+=("$a") ;;
   esac
 done
-if [ "$saw_c" = "1" ]; then
-  exec c++ -include "$COMPAT" "${args[@]}"
-fi
 exec c++ "${args[@]}"
 HOSTEOF
-sed -i "s|__COMPAT_PATH__|$COMPAT_H|" "$WRAP_DIR/ohos-host-cxx"
 cat > "$WRAP_DIR/ohos-host-cc" <<'HOSTCCEOF'
 #!/usr/bin/env bash
 # node-ohos host CC 包装器：剥 target 侧旗（同 ohos-host-cxx；C 编译无需 compat 头）
@@ -574,9 +573,9 @@ json.dump({
         {'file': 'node.gyp',
          'change': "linux+clang 分支 libraries 去 -latomic（musl sysroot 无此库）",
          'reason': "目标侧链接 nop/overlapped-checker 报 ld.lld unable to find -latomic（run 44786163438 实锤，2026-11-21）"},
-        {'file': '(不落源码) cc-wrappers/compat.h 经 -include 注入目标 CXX 与 CXX_host',
-         'change': "std::make_unique_for_overwrite shim（C++23 P1132，特性宏守卫）",
-         'reason': "V8 13.6 vector.h:296 使用之，OHOS libc++ 与 runner libstdc++ 均缺（run 44788351099 实锤 + 本机验证，2026-11-21）"},
+        {'file': '(不落源码) cc-wrappers/compat.h 经 -include 注入目标侧 CXX 包装器（-c 门控）',
+         'change': "std::make_unique_for_overwrite shim（C++23 P1132，特性宏守卫）；host 侧不注入（gcc13 自带真函数，注入反致重载歧义）",
+         'reason': "V8 13.6 vector.h:296 使用之，目标侧 OHOS libc++ 缺（run 44788351099 实锤）；host 歧义教训 run 44795703343，2026-11-21"},
     ],
     'licenses': {'node': 'MIT', 'npm': 'Artistic-2.0',
                  'npmDepsManifest': 'evidence/license-manifest.json'},
