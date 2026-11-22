@@ -1417,15 +1417,20 @@ INCLUDE_COUNT="$(tar -tzf "$OUT_DIR/include-embed.tar.gz" | wc -l)"
 log "include-embed.tar.gz：$INCLUDE_COUNT 个 tar 条目"
 
 # 实测版本读取（防 tag 差异：npm 版本从 deps/npm/package.json、V8 从 v8-version.h）
+# 门0补丁20（2026-11-22 预跑静态审计）：v8-version.h 的四个宏是 V8_MAJOR_VERSION /
+# V8_MINOR_VERSION / V8_BUILD_NUMBER / V8_PATCH_LEVEL——原实现统一拼 `V8_<name>_VERSION`
+# 且传 MAJOR/MINOR/BUILD/PATCH，BUILD/PATCH 两段匹配不到 → 实测输出 `13.6.?.?` 会原样
+# 写进 manifest.runtime.v8Version（非构建阻断，但冻结事实污染）。改为按真实宏名逐段取。
 NPM_VERSION_ACT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' \
   "$NODE_SRC/deps/npm/package.json" 2>/dev/null || echo "$NPM_VERSION_FALLBACK")"
 V8_VERSION_ACT="$(python3 - "$NODE_SRC/deps/v8/include/v8-version.h" <<'PYEOF'
 import re, sys
 txt = open(sys.argv[1]).read()
-def grab(name):
-    m = re.search(rf'#define V8_{name}_VERSION (\d+)', txt)
+def grab(macro):
+    m = re.search(rf'#define {macro} (\d+)', txt)
     return m.group(1) if m else '?'
-print(f"{grab('MAJOR')}.{grab('MINOR')}.{grab('BUILD')}.{grab('PATCH')}")
+print(f"{grab('V8_MAJOR_VERSION')}.{grab('V8_MINOR_VERSION')}."
+      f"{grab('V8_BUILD_NUMBER')}.{grab('V8_PATCH_LEVEL')}")
 PYEOF
 )"
 log "实测版本：npm=$NPM_VERSION_ACT v8=$V8_VERSION_ACT"
@@ -1557,6 +1562,9 @@ json.dump({
         {'file': '(不落源码) 脚本产物解析：libnode 实体名三路解析',
          'change': "libnode 产物路径由写死 out/Release/libnode.so 改为「精确名→libnode.so.* 通配→lib/libnode.so* 兜底」三路解析，命中记实体名 + SONAME 进 build-log",
          'reason': "--shared 时 gyp product_extension = shlib_suffix = so.<node_module_version>（configure.py:1860-1865，v24 = so.137），gyp make 按 output_basename 把库 copy 到 PRODUCT_DIR，不生成无版本号 libnode.so（install.py:186-196 同认 libnode.<suffix>；node.gyp 无 postbuild）；轮24 SOLINK 行即 obj.target/libnode.so.137 实锤，原路径会在链接全绿后误报产物缺失且整轮退出，2026-11-22"},
+        {'file': '(不落源码) 脚本版本事实：V8 四段宏名修正',
+         'change': "V8 版本抽取由统一拼 V8_<name>_VERSION 改为按真实宏名逐段取（V8_MAJOR_VERSION / V8_MINOR_VERSION / V8_BUILD_NUMBER / V8_PATCH_LEVEL）",
+         'reason': "v8-version.h 的 BUILD/PATCH 段宏名是 V8_BUILD_NUMBER / V8_PATCH_LEVEL，原拆法输出 `13.6.?.?` 会原样写进 manifest.runtime.v8Version（非构建阻断但污染冻结事实）——P6 预跑镜头本机执行原逻辑复现，修正后输出 13.6.233.17，2026-11-22"},
     ],
     'licenses': {'node': 'MIT', 'npm': 'Artistic-2.0',
                  'npmDepsManifest': 'license-manifest.json'},
