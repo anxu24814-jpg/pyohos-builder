@@ -1122,7 +1122,7 @@ json.dump({
          'reason': "P0634 第 6 形态（别名声明位置），run 44975912114 实锤三行 9 errors + 本机 clang 15.0.4 负例复现/正例通过双向验证；同款字面另 2 处（code-pointer-table.h:133 / js-dispatch-table.h:201）Base 实参具体非依赖，明确不修（盲补即编译错），2026-11-22"},
     ],
     'licenses': {'node': 'MIT', 'npm': 'Artistic-2.0',
-                 'npmDepsManifest': 'evidence/license-manifest.json'},
+                 'npmDepsManifest': 'license-manifest.json'},
     'build': {'repo': 'anxu24814-jpg/pyohos-builder', 'workflow': 'build-node.yml',
               'runId': int(run_id), 'runUrl': run_url, 'date': ''},
     'references': [{'name': 'lzzhij/harmonyos-node-notes', 'license': 'CC BY 4.0'},
