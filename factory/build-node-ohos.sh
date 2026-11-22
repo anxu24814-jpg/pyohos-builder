@@ -1261,6 +1261,36 @@ print('补丁16已落地：语句属性版本门控完成')
 PYEOF16
 
 
+# ---- 门0补丁17（run 45023953328 实锤 libnode.so / node_mksnapshot 链接红）----
+# 编译面全绿（192 errors → 0）后仅剩两处链接红：ld.lld unable to find library -latomic
+# （SOLINK libnode.so.137 + LINK node_mksnapshot）。源头 = v8_gypfiles/v8.gyp 的
+# v8_base_without_compiler 目标 link_settings.libraries（条件 '(OS=="linux" and clang==1)
+# or (v8_current_cpu in [...])' 在交叉编译下 OS=linux 且 clang==1 必中）；link_settings
+# 会传播到全部下游链接目标，而补丁3 只清了 node.gyp 那处（只作用于 node 可执行目标，
+# 故 nop/overlapped-checker 先通过）。修 = 与补丁3 同法原位清空 libraries（musl sysroot
+# 无 libatomic；aarch64 128 位原子走后端内联 + compiler-rt builtins 兜底——本机 llvm-nm
+# 实查 OHOS SDK 的 aarch64-linux-ohos/libclang_rt.builtins.a 含 __atomic_*_16 与被调
+# __aarch64_cas16_* 等 20 个 outline-atomics 符号，SDK 另无任何 libatomic 文件）。条件文本
+# 保留原样（mips/arm/riscv 分支语义不动）。
+log "门0补丁17：v8.gyp 去 -latomic（link_settings 传播，musl 无此库）"
+python3 - "$NODE_SRC" <<'PYEOF17' | tee -a "$OUT_DIR/build-log.txt"
+import sys
+root = sys.argv[1]
+rel = 'tools/v8_gypfiles/v8.gyp'
+p = f'{root}/{rel}'
+s = open(p, encoding='utf-8').read()
+old = "            'libraries': ['-latomic', ],\n"
+new = ("            'libraries': [],  # node-ohos GATE0 PATCH17: musl 无 libatomic"
+       "（同补丁3；link_settings 传播到 libnode.so/node_mksnapshot）\n")
+n = s.count(old)
+if n != 1:
+    print(f'错误：{rel} -latomic 条目命中 {n} != 1（上游结构变化？）'); sys.exit(1)
+open(p, 'w', encoding='utf-8').write(s.replace(old, new))
+print(f'{rel}: 1 处 link_settings libraries 去 -latomic')
+print('补丁17已落地：v8_gypfiles 去 -latomic 完成')
+PYEOF17
+
+
 CONFIGURE_FLAGS=(
   --dest-cpu=arm64
   --cross-compiling
@@ -1503,6 +1533,9 @@ json.dump({
         {'file': 'deps/v8/include/v8config.h',
          'change': "V8_INLINE_STATEMENT 增加 __clang_major__ >= 17 门控（clang 16 及以下走空宏，纯内联提示零语义损失）",
          'reason': "clang 15 处理「模板函数体内模板调用语句」的 [[clang::always_inline]] 语句属性时前端崩溃 exit 139（run 45011054163 实锤 json-stringifier.cc:2412；Clang 17 Release Notes 明载该崩溃于 17 修复），2026-11-22"},
+        {'file': 'tools/v8_gypfiles/v8.gyp',
+         'change': "v8_base_without_compiler 的 link_settings.libraries 去 -latomic（条件文本不动；musl sysroot 无此库）",
+         'reason': "编译面全绿后仅剩链接红：libnode.so / node_mksnapshot 报 ld.lld unable to find -latomic（link_settings 自 v8 依赖传播到全部下游链接目标；补丁3 只覆盖 node.gyp 的 node 可执行目标），run 45023953328 实锤；安全性本机实查 = SDK 无任何 libatomic 文件，而 libclang_rt.builtins.a 含 __atomic_*_16 + __aarch64_cas16_* 20 个 outline-atomics 符号，2026-11-22"},
     ],
     'licenses': {'node': 'MIT', 'npm': 'Artistic-2.0',
                  'npmDepsManifest': 'license-manifest.json'},
