@@ -462,8 +462,11 @@ cat > "$WRAP_DIR/ohos-node-cxx" <<EOF
 # 补丁4注入形态：仅真编译（args 含 -c）才 -include compat.h——configure 探针用 -E -P
 # 预处理宏清单，-include 会把头展开塞进探针输出污染版本 token（run 44791951794 实锤
 # ValueError int('clang')）；链接步亦无需 include。
+# 真编译另加 -ferror-limit=0：轮 22 的 mark-compact.cc 触顶 clang 默认 20 错上限
+# （-k 下同 TU 后续独立错误被截断），关限让失败轮一次给出完整错误面（C++ 单一 TU
+# 内错误数有限，日志膨胀可接受）。
 for a in "\$@"; do
-  case "\$a" in -c) exec "$CLANGXX" -fno-emulated-tls -include "$COMPAT_H" -include "$RANGES_H" "\$@";; esac
+  case "\$a" in -c) exec "$CLANGXX" -fno-emulated-tls -ferror-limit=0 -include "$COMPAT_H" -include "$RANGES_H" "\$@";; esac
 done
 exec "$CLANGXX" -fno-emulated-tls "\$@"
 EOF
