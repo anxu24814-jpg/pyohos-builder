@@ -862,6 +862,42 @@ if grand != 29:
 print(f'补丁9已落地：3 文件合计 {grand} 处聚合花括号化')
 PYEOF9
 
+# ---- 门0补丁10（run 44975912114 实锤 external-entity-table.h:51-53）----
+# P0634 又一形态：using 别名声明右侧的依赖类型名。类模板
+# ExternalEntityTable<Entry,size> 内 `using Base = SegmentedTable<Entry,size>`（Base 依赖），
+# 其 Base::FreelistHead / Base::Segment / Base::WriteIterator 三处落在别名声明位置，
+# OHOS clang 15 不做 relaxed-typename 推断 → missing 'typename' prior to dependent
+# type name（setup-isolate-full.o 与 v8_initializers_slow 两 TU 同红，9 errors）。
+# 修 = 原位补 typename（标准永远合法、前向兼容）。
+# 反向排除（人审勿盲修）：code-pointer-table.h:133 与 js-dispatch-table.h:201 有同字面
+# `using Space = Base::SpaceWithBlackAllocationSupport;`，但那两处外层类非模板、Base 实参
+# 为具体类型（CodePointerTableEntry / JSDispatchEntry），非依赖——补 typename 即编译错，
+# 本机 clang 15.0.4 负例/正例双向验证过（2026-11-22 /d/temp/p10-probe）。
+log "门0补丁10：别名声明位置依赖名 3 处补 typename（external-entity-table.h）"
+python3 - "$NODE_SRC" <<'PYEOF10' | tee -a "$OUT_DIR/build-log.txt"
+import sys
+root = sys.argv[1]
+rel = 'deps/v8/src/sandbox/external-entity-table.h'
+p = f'{root}/{rel}'
+s = open(p, encoding='utf-8').read()
+pairs = [
+    ('using FreelistHead = Base::FreelistHead;',
+     'using FreelistHead = typename Base::FreelistHead;'),
+    ('using Segment = Base::Segment;',
+     'using Segment = typename Base::Segment;'),
+    ('using WriteIterator = Base::WriteIterator;',
+     'using WriteIterator = typename Base::WriteIterator;'),
+]
+for old, new in pairs:
+    n = s.count(old)
+    if n != 1:
+        print(f'错误：{rel} 命中 {n} != 1（{old}，上游结构变化？）'); sys.exit(1)
+    s = s.replace(old, new)
+open(p, 'w', encoding='utf-8').write(s)
+print(f'{rel}: 3 处 typename 补齐')
+print('补丁10已落地：3 处别名声明依赖名修饰完成')
+PYEOF10
+
 
 CONFIGURE_FLAGS=(
   --dest-cpu=arm64
@@ -1081,6 +1117,9 @@ json.dump({
         {'file': 'deps/v8/src/{objects/transitions-inl.h,objects/descriptor-array-inl.h,maglev/maglev-inlining.h}',
          'change': "4 处 std::ranges/std::views 用点改写经典等价形态（二分手写循环×2 + find_if/max_element 两迭代器式）",
          'reason': "OHOS libc++ 15 缺 std::views 与部分 ranges 算法（补丁2 shim 仅注入 ada.h 覆盖不到 V8 头；run 44875780751 实锤 transitions-inl.h:291 + 本机 clang 15.0.4 改写后编译推过改写点，全树扫描闭环 ada 外恰 3 文件 4 处，2026-11-21）"},
+        {'file': 'deps/v8/src/sandbox/external-entity-table.h',
+         'change': "using 别名声明位置依赖名 3 处补 typename（FreelistHead / Segment / WriteIterator = Base::*，Base 为依赖模板别名 SegmentedTable<Entry,size>）",
+         'reason': "P0634 第 6 形态（别名声明位置），run 44975912114 实锤三行 9 errors + 本机 clang 15.0.4 负例复现/正例通过双向验证；同款字面另 2 处（code-pointer-table.h:133 / js-dispatch-table.h:201）Base 实参具体非依赖，明确不修（盲补即编译错），2026-11-22"},
     ],
     'licenses': {'node': 'MIT', 'npm': 'Artistic-2.0',
                  'npmDepsManifest': 'evidence/license-manifest.json'},
