@@ -956,6 +956,64 @@ if grand != 9:
 print(f'补丁11已落地：2 文件合计 {grand} 处元函数 ::type 依赖名修饰完成')
 PYEOF11
 
+# ---- 门0补丁12（run 44993787875 实锤 assembler.h 5 处 + 依赖传播扫描扩面）----
+# 补丁 10/11 之后，CI 的 assembler.h 又露出 5 处：IndexRange/Sequence 内的
+# `using value_type = base::value_type;`（base = Range<T> 依赖别名，小写 base——
+# 补丁10 的扫描正则只覆盖 Base|Super|Parent 大小写敏感形态，漏了这一族）+
+# LoopLabelFor 的 `detail::LoopLabelForHelper<T>::type`。
+# 本轮改用「依赖别名传播」机械扫描（别名表 + 模板参数集合，见 P6 自检笔记）重扫全树，
+# 命中 16 处候选，人审后真依赖 10 处 3 文件一次收干：
+#   ①assembler.h 5（value_type/iterator_type 各 2 + LoopLabelFor 1）
+#   ②json/json-stringifier.cc 2（成员函数模板内 using StringChar = StringT::Char）
+#   ③wasm/interpreter/wasm-interpreter.cc 3（Handlers<Compressed> 内 traits::* 三兄弟）
+# 明确不改：interpreter-builtins-x64.cc 3 处（x64 目录不在 arm64 构建图）+
+# mutex.h:103 与 zone-compact-set.h:317-318（Mutex/std 为具体名，扫描器模板参数提取误收）。
+# 本机最小复现负例恰报 `missing 'typename' prior to dependent type name 'base::value_type'`
+# （列号 22 与 CI assembler.h:197:22 一致）、正例零错。
+log "门0补丁12：依赖别名限定 10 处补 typename（assembler.h 5 + json-stringifier 2 + wasm-interpreter 3）"
+python3 - "$NODE_SRC" <<'PYEOF12' | tee -a "$OUT_DIR/build-log.txt"
+import sys
+root = sys.argv[1]
+edits = {
+    'deps/v8/src/compiler/turboshaft/assembler.h': [
+        ('  using value_type = base::value_type;',
+         '  using value_type = typename base::value_type;', 2),
+        ('  using iterator_type = base::iterator_type;',
+         '  using iterator_type = typename base::iterator_type;', 2),
+        ('using LoopLabelFor = detail::LoopLabelForHelper<T>::type;',
+         'using LoopLabelFor = typename detail::LoopLabelForHelper<T>::type;', 1),
+    ],
+    'deps/v8/src/json/json-stringifier.cc': [
+        ('  using StringChar = StringT::Char;',
+         '  using StringChar = typename StringT::Char;', 2),
+    ],
+    'deps/v8/src/wasm/interpreter/wasm-interpreter.cc': [
+        ('  using slot_offset_t = traits::slot_offset_t;',
+         '  using slot_offset_t = typename traits::slot_offset_t;', 1),
+        ('  using memory_offset32_t = traits::memory_offset32_t;',
+         '  using memory_offset32_t = typename traits::memory_offset32_t;', 1),
+        ('  using memory_offset64_t = traits::memory_offset64_t;',
+         '  using memory_offset64_t = typename traits::memory_offset64_t;', 1),
+    ],
+}
+grand = 0
+for rel, pairs in edits.items():
+    p = f'{root}/{rel}'
+    s = open(p, encoding='utf-8').read()
+    for item in pairs:
+        old, new, expect = item
+        n = s.count(old)
+        if n != expect:
+            print(f'错误：{rel} 命中 {n} != {expect}（{old[:60]}，上游结构变化？）'); sys.exit(1)
+        s = s.replace(old, new)
+        grand += expect
+    open(p, 'w', encoding='utf-8').write(s)
+    print(f'{rel}: {sum(i[2] for i in pairs)} 处')
+if grand != 10:
+    print(f'错误：合计 {grand} != 10'); sys.exit(1)
+print(f'补丁12已落地：3 文件合计 {grand} 处依赖别名限定补 typename')
+PYEOF12
+
 
 CONFIGURE_FLAGS=(
   --dest-cpu=arm64
@@ -1002,8 +1060,11 @@ if [ -z "$MARCH_HIT" ]; then
 fi
 log "补丁生效自检过：march 旗已进生成物（$MARCH_HIT）"
 
-log "make -j4（显式覆盖 2 核 nproc：-j2 实测 150 分钟未编完，run 44884007284 闸杀；4 并发 cc1plus 峰值 ~8G < 16G 内存）；构建前磁盘：$(df -h "$OUT_DIR" | tail -1 | awk '{print "avail="$4}')"
-make -C "$NODE_SRC" -j4 > "$LOGS/build.log" 2>&1
+log "make -j4 -k（显式覆盖 2 核 nproc：-j2 实测 150 分钟未编完，run 44884007284 闸杀；4 并发 cc1plus 峰值 ~8G < 16G 内存）；构建前磁盘：$(df -h "$OUT_DIR" | tail -1 | awk '{print "avail="$4}')"
+# -k（keep-going）自轮 21 后开启：此前失败点都在 configure/补丁/V8 前中段，-k 只浪费时间；
+# 轮 19/20/21 已推进到 V8 中后段（TMP 库/turboshaft），首个红 TU 挡住同批独立 TU 的错误面
+# → 用一次跑满换多层暴露。失败轮耗时会接近全量编译（估 150~175 分钟），闸 240 有余量。
+make -C "$NODE_SRC" -j4 -k > "$LOGS/build.log" 2>&1
 log "构建后磁盘：$(df -h "$OUT_DIR" | tail -1 | awk '{print "avail="$4}')（P6 预跑 P2-3 磁盘峰值观测）"
 {
   echo ""
@@ -1181,6 +1242,9 @@ json.dump({
         {'file': 'deps/v8/src/{base/template-meta-programming/list.h,compiler/turboshaft/assembler.h}',
          'change': "TMP 元函数结果类型 ::type 依赖名 9 处补 typename（list.h 6 = fold_right/fold_right1 两层 F<...>::type + insert_at_t/insert_at1_t/fold_right_t/fold_right1_t 四别名；assembler.h 3 = ReducerStack<ReducerList> 内 reducer_list_insert_at×2 + reducer_list_to_stack）",
          'reason': "P0634 第 7 形态（元函数 ::type 后缀），run 44987355713 实锤 list.h 5 行 + 本机 -include 四头编译细化出 6 处（含 CI 未报的 137 行）且同目录三头零错 + assembler.h 3 处最小复现负例恰报、正例零错双向验证；反向排除 67 处候选（maglev-ir 59 + baseline-compiler 3 的 CallInterfaceDescriptorFor<Builtin::k...> 具体枚举实参、mutex/condition-variable 3 的 LazyStaticInstance<Mutex,...> 具体类实参）非依赖不修，2026-11-22"},
+        {'file': 'deps/v8/src/{compiler/turboshaft/assembler.h,json/json-stringifier.cc,wasm/interpreter/wasm-interpreter.cc}',
+         'change': "依赖限定名 10 处补 typename（assembler.h 5 = IndexRange/Sequence 的 base::value_type/iterator_type ×4 + detail::LoopLabelForHelper<T>::type；json-stringifier.cc 2 = 成员函数模板内 StringT::Char；wasm-interpreter.cc 3 = Handlers<Compressed> 内 traits::* 三兄弟）",
+         'reason': "P0634 第 8 形态（小写依赖别名 base / traits / 模板参数前缀），run 44993787875 实锤 assembler.h 5 行（列号与最小复现一致）+ 依赖别名传播扫描（别名表+模板参数集合）全树 16 候选人审收敛真依赖 10 处；明确不改 = interpreter-builtins-x64.cc 3（x64 不在 arm64 构建图）+ mutex.h:103/zone-compact-set.h:317-318（Mutex/std 具体名系扫描器误收）；同轮 make 加 -k（一次暴露多层），2026-11-22"},
     ],
     'licenses': {'node': 'MIT', 'npm': 'Artistic-2.0',
                  'npmDepsManifest': 'license-manifest.json'},
