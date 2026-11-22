@@ -1014,6 +1014,249 @@ if grand != 10:
 print(f'补丁12已落地：3 文件合计 {grand} 处依赖别名限定补 typename')
 PYEOF12
 
+# ---- 门0补丁13（run 45011054163 实锤：-k 跑满暴露的全量 P0960 面）----
+# P0960（C++20 聚合括号初始化）在「库函数中介」路径上的第二形态：补丁9 修的是直写
+# T(x) 构造点，本轮露出的是经库转发再落地的构造——
+#   Zone::New<T>(args...)  →  new (p) T(args...)
+#   ZoneVector/SmallVector::emplace_back(args...) / std::vector::emplace_back(args...)
+#   std::allocator_traits::construct → std::construct_at(p, args...)
+# 这些路径把实参原样转发给括号初始化，clang 15 缺 P0960 即报 no matching constructor。
+# 修 = 调用点先构造成花括号聚合临时再转发（emplace_back(T{a,b})），库函数收到单值走
+# 拷贝/移动（C++17 保证省略，零开销），语义与原 P0960 逐字段一致；不改类型定义，保持
+# 聚合（structured binding / 指派初始化不受波及）。
+# 花括号比括号严格：窄化转换必须显式 static_cast（RecGroup.start_index int→uint32_t 一处）。
+# 覆盖 12 处替换 8 文件：RecGroup 2 + BlockPatch 1 + MaglevCallerDetails 1 + MaglevCallSiteInfo 1
+# + RunningLocalHeap 2（Linux/Darwin 双分支）+ UnpublishedWasmCode 2（开/闭行）+ ElidedStringPart
+# 联合体 1 + ncrypto::Buffer 2。计数口径 = 文本替换对（不是逻辑构造点）。
+log "门0补丁13：聚合构造点经库中介转发 12 处改花括号（8 文件）"
+python3 - "$NODE_SRC" <<'PYEOF13' | tee -a "$OUT_DIR/build-log.txt"
+import sys
+root = sys.argv[1]
+edits = {
+    'deps/v8/src/wasm/wasm-module-builder.h': [
+        ('    recursive_groups_.emplace_back(\n'
+         '        current_recursive_group_start_,\n'
+         '        static_cast<uint32_t>(types_.size()) - current_recursive_group_start_);',
+         '    recursive_groups_.emplace_back(RecGroup{\n'
+         '        static_cast<uint32_t>(current_recursive_group_start_),\n'
+         '        static_cast<uint32_t>(types_.size()) - current_recursive_group_start_});', 1),
+        ('    recursive_groups_.emplace_back(start, size);',
+         '    recursive_groups_.emplace_back(RecGroup{start, size});', 1),
+    ],
+    'deps/v8/src/maglev/maglev-regalloc.cc': [
+        ('    patches_.emplace_back(node_it_ - block->nodes().begin(), gap_move);',
+         '    patches_.emplace_back(BlockPatch{node_it_ - block->nodes().begin(), gap_move});', 1),
+    ],
+    'deps/v8/src/maglev/maglev-graph-builder.cc': [
+        ('  MaglevCallSiteInfo* call_site = zone()->New<MaglevCallSiteInfo>(\n'
+         '      MaglevCallerDetails{\n'
+         '          arguments, &generic_call->lazy_deopt_info()->top_frame(),\n'
+         '          known_node_aspects().Clone(zone()), loop_effects_,\n'
+         '          unobserved_context_slot_stores_, catch_details, IsInsideLoop(),\n'
+         '          /* is_eager_inline */ false, call_frequency},\n'
+         '      generic_call, feedback_cell, score);',
+         '  MaglevCallSiteInfo* call_site = zone()->New<MaglevCallSiteInfo>(\n'
+         '      MaglevCallSiteInfo{\n'
+         '          MaglevCallerDetails{\n'
+         '              arguments, &generic_call->lazy_deopt_info()->top_frame(),\n'
+         '              known_node_aspects().Clone(zone()), loop_effects_,\n'
+         '              unobserved_context_slot_stores_, catch_details, IsInsideLoop(),\n'
+         '              /* is_eager_inline */ false, call_frequency},\n'
+         '          generic_call, feedback_cell, score});', 1),
+        ('  MaglevCallerDetails* caller_details = zone()->New<MaglevCallerDetails>(\n'
+         '      arguments_vector, deopt_frame,\n'
+         '      current_interpreter_frame_.known_node_aspects(), loop_effects_,\n'
+         '      unobserved_context_slot_stores_, catch_block_details, IsInsideLoop(),\n'
+         '      /* is_eager_inline */ true, call_frequency);',
+         '  MaglevCallerDetails* caller_details = zone()->New<MaglevCallerDetails>(\n'
+         '      MaglevCallerDetails{\n'
+         '          arguments_vector, deopt_frame,\n'
+         '          current_interpreter_frame_.known_node_aspects(), loop_effects_,\n'
+         '          unobserved_context_slot_stores_, catch_block_details, IsInsideLoop(),\n'
+         '          /* is_eager_inline */ true, call_frequency});', 1),
+    ],
+    'deps/v8/src/heap/safepoint.cc': [
+        ('      running_local_heaps.emplace_back(local_heap, qos_override);',
+         '      running_local_heaps.emplace_back(RunningLocalHeap{local_heap, qos_override});', 1),
+        ('      running_local_heaps.emplace_back(local_heap);',
+         '      running_local_heaps.emplace_back(RunningLocalHeap{local_heap});', 1),
+    ],
+    'deps/v8/src/wasm/wasm-code-manager.cc': [
+        ('    generated_code.emplace_back(\n',
+         '    generated_code.emplace_back(UnpublishedWasmCode{\n', 1),
+        ('        std::move(result.assumptions));',
+         '        std::move(result.assumptions)});', 1),
+    ],
+    'deps/v8/src/compiler/turboshaft/string-escape-analysis-reducer.h': [
+        ('    ElidedStringPart(Kind kind, V<String> index) : data(index), kind(kind) {}',
+         '    ElidedStringPart(Kind kind, V<String> index) : data{index}, kind(kind) {}', 1),
+    ],
+    'src/crypto/crypto_kmac.cc': [
+        ('ncrypto::Buffer<const void>(key_data, key_size)',
+         'ncrypto::Buffer<const void>{key_data, key_size}', 1),
+        ('  if (!mac_ctx.update(ncrypto::Buffer<const void>(params.data.data(),\n'
+         '                                                  params.data.size()))) {',
+         '  if (!mac_ctx.update(ncrypto::Buffer<const void>{params.data.data(),\n'
+         '                                                  params.data.size()})) {', 1),
+    ],
+}
+grand = 0
+for rel, pairs in edits.items():
+    p = f'{root}/{rel}'
+    s = open(p, encoding='utf-8').read()
+    for item in pairs:
+        old, new, expect = item
+        n = s.count(old)
+        if n != expect:
+            print(f'错误：{rel} 命中 {n} != {expect}（{old[:60]!r}，上游结构变化？）'); sys.exit(1)
+        s = s.replace(old, new)
+        grand += expect
+    open(p, 'w', encoding='utf-8').write(s)
+    print(f'{rel}: {sum(i[2] for i in pairs)} 处')
+if grand != 12:
+    print(f'错误：合计 {grand} != 12'); sys.exit(1)
+print(f'补丁13已落地：8 文件合计 {grand} 处聚合构造点花括号化')
+PYEOF13
+
+# ---- 门0补丁14（run 45011054163 实锤 maglev-ir.h:4372/4385/4402 ×14 TU 同一处）----
+# P0634 第 9 形态：别名声明右侧的依赖成员模板限定名。maglev-ir.h 模板类
+# CheckedNumberOrOddballToFloat64OrHoleyFloat64<Derived,FloatType> 内
+#   using TaggedToFloat64ConversionTypeOffset =
+#       Base::template NextBitField<TaggedToFloat64ConversionType, 2>;
+# Base = FixedInputValueNodeT<1,Derived> 依赖、NextBitField 是 NodeBase 的 protected
+# 别名模板成员 → clang 15 在该位置不认 Base::template ... 为类型名，报
+# "expected a type / expected ';' after alias declaration"，连带 4372/4385 两处
+# 使用点 undeclared identifier（14 个 TU 各报同一 6 行 = 头文件级）。
+# 修 = 原位补 typename（typename nested-name-specifier template(opt) simple-template-id
+# 是标准形，永远合法、前向兼容）。
+# 明确不改：4479/4566/4598 三处同名字面是不依赖具体类（Base 实参已具体化）内的
+# 无限定 NextBitField<...>，本机不报错，不动。
+log "门0补丁14：依赖成员模板限定名 1 处补 typename（maglev-ir.h）"
+python3 - "$NODE_SRC" <<'PYEOF14' | tee -a "$OUT_DIR/build-log.txt"
+import sys
+root = sys.argv[1]
+rel = 'deps/v8/src/maglev/maglev-ir.h'
+p = f'{root}/{rel}'
+s = open(p, encoding='utf-8').read()
+old = ('  using TaggedToFloat64ConversionTypeOffset =\n'
+       '      Base::template NextBitField<TaggedToFloat64ConversionType, 2>;')
+new = ('  using TaggedToFloat64ConversionTypeOffset =\n'
+       '      typename Base::template NextBitField<TaggedToFloat64ConversionType, 2>;')
+n = s.count(old)
+if n != 1:
+    print(f'错误：{rel} 命中 {n} != 1（上游结构变化？）'); sys.exit(1)
+open(p, 'w', encoding='utf-8').write(s.replace(old, new))
+print(f'{rel}: 1 处 typename 补齐')
+print('补丁14已落地：依赖成员模板限定名修饰完成')
+PYEOF14
+
+# ---- 门0补丁15（run 45011054163 实锤 heap-visitor.h 200/203/207 × 51 errors 级联）----
+# clang 15 在 CRTP 基类实例化时求值 requires-clause：HeapVisitor<D> 作为 D 的基类被
+# 实例化时 D 尚不完备，`ConcreteVisitor::UsePrecomputedObjectSize()` 查找失败 →
+# 三条 Visit 重载的约束全废 → 后续 51 处级联（too few arguments / Visit protected /
+# no viable conversion）。clang 16+ 推迟到完备点求值，故上游无此问题。
+# 修 = 约束改为函数体内的 static_assert（同一判据、同一时机保障：声明不再约束，
+# 按元数重载；误用与否在函数体实例化时才检查，此时 D 必完备）——语义与编译期防护
+# 等价，仅报错形态从约束失败变为 static_assert。3 声明 + 3 定义 = 6 处。
+log "门0补丁15：CRTP 约束改 static_assert 6 处（heap-visitor.h/inl）"
+python3 - "$NODE_SRC" <<'PYEOF15' | tee -a "$OUT_DIR/build-log.txt"
+import sys
+root = sys.argv[1]
+edits = {
+    'deps/v8/src/heap/heap-visitor.h': [
+        ('  V8_INLINE size_t Visit(Tagged<HeapObject> object)\n'
+         '    requires(!ConcreteVisitor::UsePrecomputedObjectSize());',
+         '  V8_INLINE size_t Visit(Tagged<HeapObject> object);', 1),
+        ('  V8_INLINE size_t Visit(Tagged<Map> map, Tagged<HeapObject> object)\n'
+         '    requires(!ConcreteVisitor::UsePrecomputedObjectSize());',
+         '  V8_INLINE size_t Visit(Tagged<Map> map, Tagged<HeapObject> object);', 1),
+        ('  V8_INLINE size_t Visit(Tagged<Map> map, Tagged<HeapObject> object,\n'
+         '                         int object_size)\n'
+         '    requires(ConcreteVisitor::UsePrecomputedObjectSize());',
+         '  V8_INLINE size_t Visit(Tagged<Map> map, Tagged<HeapObject> object,\n'
+         '                         int object_size);', 1),
+    ],
+    'deps/v8/src/heap/heap-visitor-inl.h': [
+        ('size_t HeapVisitor<ConcreteVisitor>::Visit(Tagged<HeapObject> object)\n'
+         '  requires(!ConcreteVisitor::UsePrecomputedObjectSize())\n'
+         '{\n'
+         '  return Visit(object->map(cage_base()), object);\n'
+         '}',
+         'size_t HeapVisitor<ConcreteVisitor>::Visit(Tagged<HeapObject> object) {\n'
+         '  static_assert(!ConcreteVisitor::UsePrecomputedObjectSize());\n'
+         '  return Visit(object->map(cage_base()), object);\n'
+         '}', 1),
+        ('size_t HeapVisitor<ConcreteVisitor>::Visit(Tagged<Map> map,\n'
+         '                                           Tagged<HeapObject> object)\n'
+         '  requires(!ConcreteVisitor::UsePrecomputedObjectSize())\n'
+         '{\n'
+         '  return Visit(map, object, MaybeObjectSize());\n'
+         '}',
+         'size_t HeapVisitor<ConcreteVisitor>::Visit(Tagged<Map> map,\n'
+         '                                           Tagged<HeapObject> object) {\n'
+         '  static_assert(!ConcreteVisitor::UsePrecomputedObjectSize());\n'
+         '  return Visit(map, object, MaybeObjectSize());\n'
+         '}', 1),
+        ('size_t HeapVisitor<ConcreteVisitor>::Visit(Tagged<Map> map,\n'
+         '                                           Tagged<HeapObject> object,\n'
+         '                                           int object_size)\n'
+         '  requires(ConcreteVisitor::UsePrecomputedObjectSize())\n'
+         '{\n'
+         '  return Visit(map, object, MaybeObjectSize(object_size));\n'
+         '}',
+         'size_t HeapVisitor<ConcreteVisitor>::Visit(Tagged<Map> map,\n'
+         '                                           Tagged<HeapObject> object,\n'
+         '                                           int object_size) {\n'
+         '  static_assert(ConcreteVisitor::UsePrecomputedObjectSize());\n'
+         '  return Visit(map, object, MaybeObjectSize(object_size));\n'
+         '}', 1),
+    ],
+}
+grand = 0
+for rel, pairs in edits.items():
+    p = f'{root}/{rel}'
+    s = open(p, encoding='utf-8').read()
+    for item in pairs:
+        old, new, expect = item
+        n = s.count(old)
+        if n != expect:
+            print(f'错误：{rel} 命中 {n} != {expect}（{old[:60]!r}，上游结构变化？）'); sys.exit(1)
+        s = s.replace(old, new)
+        grand += expect
+    open(p, 'w', encoding='utf-8').write(s)
+    print(f'{rel}: {sum(i[2] for i in pairs)} 处')
+if grand != 6:
+    print(f'错误：合计 {grand} != 6'); sys.exit(1)
+print(f'补丁15已落地：2 文件合计 {grand} 处约束改 static_assert')
+PYEOF15
+
+# ---- 门0补丁16（run 45011054163 实锤 json-stringifier.cc 前端崩溃 exit 139）----
+# clang 15 在处理「模板函数体内的模板调用语句」上的 [[clang::always_inline]] 语句属性时
+# 前端崩溃（Sema::ProcessStmtAttributes 空指针，栈已留证）。Clang 17 Release Notes 明载
+# 该崩溃在 17 修复（always_inline/noinline 语句属性用于模板函数体内模板函数调用）。
+# V8 的 V8_INLINE_STATEMENT 正是该属性（v8config.h:508），json-stringifier.cc 6 处
+# 模板成员函数内使用 → 遇 clang 15 必崩。修 = 版本门控 ≥17（纯内联提示，丢掉零语义损失；
+# clang 16 及以下走空宏）。
+log "门0补丁16：V8_INLINE_STATEMENT 版本门控 ≥17（v8config.h，clang15 崩溃规避）"
+python3 - "$NODE_SRC" <<'PYEOF16' | tee -a "$OUT_DIR/build-log.txt"
+import sys
+root = sys.argv[1]
+rel = 'deps/v8/include/v8config.h'
+p = f'{root}/{rel}'
+s = open(p, encoding='utf-8').read()
+old = ('#if !defined(DEBUG) && defined(__clang__) && V8_HAS_ATTRIBUTE_ALWAYS_INLINE\n'
+       '# define V8_INLINE_STATEMENT [[clang::always_inline]]')
+new = ('#if !defined(DEBUG) && defined(__clang__) && V8_HAS_ATTRIBUTE_ALWAYS_INLINE && \\\n'
+       '    __clang_major__ >= 17\n'
+       '# define V8_INLINE_STATEMENT [[clang::always_inline]]')
+n = s.count(old)
+if n != 1:
+    print(f'错误：{rel} 命中 {n} != 1（上游结构变化？）'); sys.exit(1)
+open(p, 'w', encoding='utf-8').write(s.replace(old, new))
+print(f'{rel}: 1 处版本门控')
+print('补丁16已落地：语句属性版本门控完成')
+PYEOF16
+
 
 CONFIGURE_FLAGS=(
   --dest-cpu=arm64
@@ -1245,6 +1488,18 @@ json.dump({
         {'file': 'deps/v8/src/{compiler/turboshaft/assembler.h,json/json-stringifier.cc,wasm/interpreter/wasm-interpreter.cc}',
          'change': "依赖限定名 10 处补 typename（assembler.h 5 = IndexRange/Sequence 的 base::value_type/iterator_type ×4 + detail::LoopLabelForHelper<T>::type；json-stringifier.cc 2 = 成员函数模板内 StringT::Char；wasm-interpreter.cc 3 = Handlers<Compressed> 内 traits::* 三兄弟）",
          'reason': "P0634 第 8 形态（小写依赖别名 base / traits / 模板参数前缀），run 44993787875 实锤 assembler.h 5 行（列号与最小复现一致）+ 依赖别名传播扫描（别名表+模板参数集合）全树 16 候选人审收敛真依赖 10 处；明确不改 = interpreter-builtins-x64.cc 3（x64 不在 arm64 构建图）+ mutex.h:103/zone-compact-set.h:317-318（Mutex/std 具体名系扫描器误收）；同轮 make 加 -k（一次暴露多层），2026-11-22"},
+        {'file': 'deps/v8/src/{wasm/wasm-module-builder.h,maglev/maglev-regalloc.cc,maglev/maglev-graph-builder.cc,heap/safepoint.cc,wasm/wasm-code-manager.cc,compiler/turboshaft/string-escape-analysis-reducer.h} + src/crypto/crypto_kmac.cc',
+         'change': "聚合构造点经库中介转发 12 处改花括号（emplace_back(T{a,b}) / New<T>(T{...}) 形态；库函数收单值走移动、C++17 省略零开销；类型定义不动保持聚合；窄化处显式 static_cast）",
+         'reason': "P0960 第二形态（Zone::New / emplace_back / construct_at 等库中介路径的聚合括号初始化），OHOS clang 15 缺 P0960 报 no matching constructor（run 45011054163 实锤 6 类型 7 文件；make -k 首次跑满暴露全量面），2026-11-22"},
+        {'file': 'deps/v8/src/maglev/maglev-ir.h',
+         'change': "依赖成员模板限定名 1 处补 typename（Base::template NextBitField<...>，Base = FixedInputValueNodeT<1,Derived> 依赖）",
+         'reason': "P0634 第 9 形态（typename + template 双消歧义限定名），run 45011054163 实锤 4372/4385/4402 六行 ×14 TU；明确不改 4479/4566/4598 三处不依赖具体类内的无限定同名字面，2026-11-22"},
+        {'file': 'deps/v8/src/heap/{heap-visitor.h,heap-visitor-inl.h}',
+         'change': "CRTP Visit 重载的 requires 约束 6 处删除、同判据移入函数体 static_assert（3 声明 + 3 定义）",
+         'reason': "clang 15 在 CRTP 基类实例化时求值 requires-clause（派生类尚未完备）→ ConcreteVisitor::UsePrecomputedObjectSize 查找失败，51 处级联（run 45011054163 实锤 heap-visitor.h:200/203/207 全实例化点；clang 16+ 推迟求值故上游无此问题），2026-11-22"},
+        {'file': 'deps/v8/include/v8config.h',
+         'change': "V8_INLINE_STATEMENT 增加 __clang_major__ >= 17 门控（clang 16 及以下走空宏，纯内联提示零语义损失）",
+         'reason': "clang 15 处理「模板函数体内模板调用语句」的 [[clang::always_inline]] 语句属性时前端崩溃 exit 139（run 45011054163 实锤 json-stringifier.cc:2412；Clang 17 Release Notes 明载该崩溃于 17 修复），2026-11-22"},
     ],
     'licenses': {'node': 'MIT', 'npm': 'Artistic-2.0',
                  'npmDepsManifest': 'license-manifest.json'},
