@@ -898,6 +898,64 @@ print(f'{rel}: 3 处 typename 补齐')
 print('补丁10已落地：3 处别名声明依赖名修饰完成')
 PYEOF10
 
+# ---- 门0补丁11（run 44987355713 实锤 list.h:150 + 本机全目录/最小复现双验证）----
+# P0634 第 7 形态：模板元编程库里的依赖类型名后缀 ::type（元函数结果类型）未写 typename。
+# ①deps/v8/src/base/template-meta-programming/list.h 6 处（fold_right_impl/fold_right1_impl
+#   的 using type = F<Head, 元函数::type>::type 两层 + insert_at_t/insert_at1_t/
+#   fold_right_t/fold_right1_t 四个别名右侧 ::type）；②compiler/turboshaft/assembler.h
+#   3 处（ReducerStack<ReducerList> 内 reducer_list_insert_at / reducer_list_to_stack 的 ::type）。
+# OHOS clang 15 在「别名声明右侧 + 类型是依赖名」该路径不放松 typename（CI 报 5 处，本机
+# -include 四头编译细化出 list.h 6 处含 CI 未报的 137 行；同目录 common/functional/
+#   string-literal 三头零错）。修 = 原位补 typename（标准永远合法）。
+# 反向排除（67 处候选人审勿盲修）：maglev-ir.cc 59 + baseline-compiler.cc 3 三处
+# CallInterfaceDescriptorFor<Builtin::k...>::type（Builtin 枚举值具体实参）+
+# mutex.h/condition-variable.h 3 处 LazyStaticInstance<Mutex,...>::type（具体类实参）
+# ——实参皆非依赖，补 typename 是编译错，不动。
+log "门0补丁11：TMP 元函数 ::type 依赖名 9 处补 typename（list.h 6 + assembler.h 3）"
+python3 - "$NODE_SRC" <<'PYEOF11' | tee -a "$OUT_DIR/build-log.txt"
+import sys
+root = sys.argv[1]
+edits = {
+    'deps/v8/src/base/template-meta-programming/list.h': [
+        ('      F<Head, typename fold_right_impl<F, T, list<Tail...>>::type>::type;',
+         '      typename F<Head, typename fold_right_impl<F, T, list<Tail...>>::type>::type;'),
+        ('      F<Head, typename fold_right1_impl<F, T, list1<Tail...>>::type>::type;',
+         '      typename F<Head, typename fold_right1_impl<F, T, list1<Tail...>>::type>::type;'),
+        ('using insert_at_t = insert_at<List, I, T>::type;',
+         'using insert_at_t = typename insert_at<List, I, T>::type;'),
+        ('using insert_at1_t = insert_at1<List1, I, T>::type;',
+         'using insert_at1_t = typename insert_at1<List1, I, T>::type;'),
+        ('using fold_right_t = fold_right<F, List, T>::type;',
+         'using fold_right_t = typename fold_right<F, List, T>::type;'),
+        ('using fold_right1_t = fold_right1<F, List1, T>::type;',
+         'using fold_right1_t = typename fold_right1<F, List1, T>::type;'),
+    ],
+    'deps/v8/src/compiler/turboshaft/assembler.h': [
+        ('      reducer_list_insert_at<ReducerList, base_index, GenericReducerBase>::type;',
+         '      typename reducer_list_insert_at<ReducerList, base_index, GenericReducerBase>::type;'),
+        ('      reducer_list_insert_at<WithGeneric, ep_index,\n                             EmitProjectionReducer>::type;',
+         '      typename reducer_list_insert_at<WithGeneric, ep_index,\n                             EmitProjectionReducer>::type;'),
+        ('  using type = reducer_list_to_stack<WithGenericAndEmitProjection,\n                                     StackBottom<ReducerList>>::type;',
+         '  using type = typename reducer_list_to_stack<WithGenericAndEmitProjection,\n                                     StackBottom<ReducerList>>::type;'),
+    ],
+}
+grand = 0
+for rel, pairs in edits.items():
+    p = f'{root}/{rel}'
+    s = open(p, encoding='utf-8').read()
+    for old, new in pairs:
+        n = s.count(old)
+        if n != 1:
+            print(f'错误：{rel} 命中 {n} != 1（{old[:60]}，上游结构变化？）'); sys.exit(1)
+        s = s.replace(old, new)
+    open(p, 'w', encoding='utf-8').write(s)
+    print(f'{rel}: {len(pairs)} 处')
+    grand += len(pairs)
+if grand != 9:
+    print(f'错误：合计 {grand} != 9'); sys.exit(1)
+print(f'补丁11已落地：2 文件合计 {grand} 处元函数 ::type 依赖名修饰完成')
+PYEOF11
+
 
 CONFIGURE_FLAGS=(
   --dest-cpu=arm64
@@ -1120,6 +1178,9 @@ json.dump({
         {'file': 'deps/v8/src/sandbox/external-entity-table.h',
          'change': "using 别名声明位置依赖名 3 处补 typename（FreelistHead / Segment / WriteIterator = Base::*，Base 为依赖模板别名 SegmentedTable<Entry,size>）",
          'reason': "P0634 第 6 形态（别名声明位置），run 44975912114 实锤三行 9 errors + 本机 clang 15.0.4 负例复现/正例通过双向验证；同款字面另 2 处（code-pointer-table.h:133 / js-dispatch-table.h:201）Base 实参具体非依赖，明确不修（盲补即编译错），2026-11-22"},
+        {'file': 'deps/v8/src/{base/template-meta-programming/list.h,compiler/turboshaft/assembler.h}',
+         'change': "TMP 元函数结果类型 ::type 依赖名 9 处补 typename（list.h 6 = fold_right/fold_right1 两层 F<...>::type + insert_at_t/insert_at1_t/fold_right_t/fold_right1_t 四别名；assembler.h 3 = ReducerStack<ReducerList> 内 reducer_list_insert_at×2 + reducer_list_to_stack）",
+         'reason': "P0634 第 7 形态（元函数 ::type 后缀），run 44987355713 实锤 list.h 5 行 + 本机 -include 四头编译细化出 6 处（含 CI 未报的 137 行）且同目录三头零错 + assembler.h 3 处最小复现负例恰报、正例零错双向验证；反向排除 67 处候选（maglev-ir 59 + baseline-compiler 3 的 CallInterfaceDescriptorFor<Builtin::k...> 具体枚举实参、mutex/condition-variable 3 的 LazyStaticInstance<Mutex,...> 具体类实参）非依赖不修，2026-11-22"},
     ],
     'licenses': {'node': 'MIT', 'npm': 'Artistic-2.0',
                  'npmDepsManifest': 'license-manifest.json'},
