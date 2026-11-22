@@ -1291,6 +1291,40 @@ print('补丁17已落地：v8_gypfiles 去 -latomic 完成')
 PYEOF17
 
 
+# ---- 门0补丁21（run 45039296873 实锤：编译全绿 + libnode.so.137 SOLINK 成功，仅剩一个符号）----
+# 该轮 5 个链接目标（node_mksnapshot / embedtest / shared_embedtest / node / cctest）全部仅因
+# `undefined symbol: getservbyport_r` 红（前两者为静态链 libcares.a 直报，后三者为
+# --no-allow-shlib-undefined 经 libnode.so.137 转发）。出处 = deps/cares/src/lib/ares_getnameinfo.c
+# 的 lookup_service（HAVE_GETSERVBYPORT_R 守卫内 311/316/318 三行之一）。
+# 根源：交叉编译时 OS=linux → cares.gyp 选 config/linux/ares_config.h（#define HAVE_GETSERVBYPORT_R 1），
+# 而 OHOS musl 不提供该函数——本机 SDK 实查：sysroot libc.so 仅导出 getservbyname / getservbyport
+# （无任何 *_r），libc.a 有 getservbyname_r.o / getservbyport.o 而无 getservbyport_r.o。
+# ★ 上游自带答案：node 24.22.3 随包 deps/cares/config/openharmony/ares_config.h 与本 linux 版
+# 唯一语义差异 = undef HAVE_GETSERVBYPORT_R（本机 diff 实证），即上游确认 OHOS 无此函数、走
+# getservbyport(port, proto) 回退（musl 导出并有实现）。修 = linux 配置同比 undef（与上游
+# openharmony 口径逐字对齐）；影响面仅 ARES_NI_LOOKUPSERVICE（反向地址查询服务名），回退非
+# 线程安全属上游同款妥协。host 侧（glibc）同走回退，getservbyport 在 glibc 亦存在，无害。
+log "门0补丁21：c-ares 配置 undef HAVE_GETSERVBYPORT_R（OHOS musl 无此函数，对齐上游 openharmony 配置）"
+python3 - "$NODE_SRC" <<'PYEOF21' | tee -a "$OUT_DIR/build-log.txt"
+import sys
+root = sys.argv[1]
+rel = 'deps/cares/config/linux/ares_config.h'
+p = f'{root}/{rel}'
+s = open(p, encoding='utf-8').read()
+old = ("/* Define to 1 if you have `getservbyport_r` */\n"
+       "#define HAVE_GETSERVBYPORT_R 1\n")
+new = ("/* Define to 1 if you have `getservbyport_r` */\n"
+       "/* #undef HAVE_GETSERVBYPORT_R */  /* node-ohos GATE0 PATCH21: OHOS musl 无此函数"
+       "（对齐上游 config/openharmony，回退 getservbyport） */\n")
+n = s.count(old)
+if n != 1:
+    print(f'错误：{rel} HAVE_GETSERVBYPORT_R 条目命中 {n} != 1（上游结构变化？）'); sys.exit(1)
+open(p, 'w', encoding='utf-8').write(s.replace(old, new))
+print(f'{rel}: 1 处 HAVE_GETSERVBYPORT_R 改为 undef')
+print('补丁21已落地：c-ares getservbyport_r 回退完成')
+PYEOF21
+
+
 CONFIGURE_FLAGS=(
   --dest-cpu=arm64
   --cross-compiling
@@ -1565,6 +1599,9 @@ json.dump({
         {'file': '(不落源码) 脚本版本事实：V8 四段宏名修正',
          'change': "V8 版本抽取由统一拼 V8_<name>_VERSION 改为按真实宏名逐段取（V8_MAJOR_VERSION / V8_MINOR_VERSION / V8_BUILD_NUMBER / V8_PATCH_LEVEL）",
          'reason': "v8-version.h 的 BUILD/PATCH 段宏名是 V8_BUILD_NUMBER / V8_PATCH_LEVEL，原拆法输出 `13.6.?.?` 会原样写进 manifest.runtime.v8Version（非构建阻断但污染冻结事实）——P6 预跑镜头本机执行原逻辑复现，修正后输出 13.6.233.17，2026-11-22"},
+        {'file': 'deps/cares/config/linux/ares_config.h',
+         'change': "HAVE_GETSERVBYPORT_R 由 define 改为 undef（c-ares 回退 getservbyport；与上游 config/openharmony/ares_config.h 逐字对齐）",
+         'reason': "OS=linux 交叉编译使 cares.gyp 选 linux 配置（define 该宏），而 OHOS musl 无 getservbyport_r——SDK 实查 libc.so 只导出 getservbyname/getservbyport、libc.a 无 getservbyport_r.o；round 28 编译全绿 + libnode.so.137 SOLINK 成功后，5 个链接目标（node_mksnapshot/embedtest/shared_embedtest/node/cctest）仅因该符号红（run 45039296873 实锤）；上游随包 openharmony 配置与 linux 版唯一差异即此处 undef（本机 diff 实证），2026-11-23"},
     ],
     'licenses': {'node': 'MIT', 'npm': 'Artistic-2.0',
                  'npmDepsManifest': 'license-manifest.json'},
