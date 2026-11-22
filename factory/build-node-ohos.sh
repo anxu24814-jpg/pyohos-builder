@@ -1348,11 +1348,26 @@ log "构建后磁盘：$(df -h "$OUT_DIR" | tail -1 | awk '{print "avail="$4}')�
   tail -100 "$LOGS/build.log"
 } >> "$OUT_DIR/build-log.txt"
 
-LIBNODE="$NODE_SRC/out/Release/libnode.so"
-if [ ! -s "$LIBNODE" ]; then
-  echo "错误：构建产物缺失或零字节：$LIBNODE（构建失败但 make 返回 0？查 $LOGS/build.log）。" >&2
+# ---- 门0补丁19（2026-11-22 预跑静态审计；实锤 = 轮24 SOLINK 输出名）----
+# --shared 时 node.gyp 给 libnode 目标设 product_extension = <(shlib_suffix)，而
+# configure.py:1860-1865 在 linux 上取 shlib_suffix = 'so.<node_module_version>'（v24 = so.137）
+# → 产物实体 = out/Release/libnode.so.137。gyp make 的 _InstallableTargetInstallPath 用
+# output_basename（libnode.so.137）把共享库 copy 到 PRODUCT_DIR，**不生成无版本号的
+# libnode.so**（tools/install.py:186-196 同样只认 libnode.<suffix>；node.gyp 无 postbuild 建链）。
+# 原写死 out/Release/libnode.so 会在链接全绿后误报「产物缺失」并整轮退出（且早于校验/打包，
+# 不产任何 artifact）。修 = 精确名 → 通配 → lib/ 兜底三路解析，命中即记实体名；SONAME 记档
+# 说明（门 1/2 一律 dlopen 绝对路径加载，SONAME=libnode.so.137 不影响）。
+LIBNODE=""
+for cand in "$NODE_SRC/out/Release/libnode.so" "$NODE_SRC"/out/Release/libnode.so.* "$NODE_SRC"/out/Release/lib/libnode.so*; do
+  if [ -s "$cand" ]; then LIBNODE="$cand"; break; fi
+done
+if [ -z "$LIBNODE" ]; then
+  echo "错误：out/Release 下无 libnode.so*（--shared 产物应为 libnode.so.<node_module_version>）——make 返回 0 但产物缺失？查 $LOGS/build.log。" >&2
+  ls -l "$NODE_SRC/out/Release" 2>/dev/null | grep -i libnode >&2 || true
   exit 1
 fi
+log "libnode 实体解析：$LIBNODE"
+log "libnode SONAME：$("$READELF" -d "$LIBNODE" | awk '/SONAME/{print $NF}')（门 1/2 dlopen 绝对路径加载，SONAME 不影响）"
 # 官方 --shared 产物已预 strip，不再 strip（任务书 §3 #1）
 
 # ================= e. 产物六件生成（任务书 §3）=================
@@ -1539,6 +1554,9 @@ json.dump({
         {'file': '(不落源码) 脚本自校验：npm 文件集下限 + 关键路径四钉',
          'change': "npm-fileset.tar.gz 条目数下限 5000→2000，并新增关键路径四钉（npm/package.json、npm/bin/npm-cli.js、npm/lib/cli.js、npm/node_modules/ 树）",
          'reason': "原 5000 下限源自「deps/npm 万级」误估（v24.22.3 实测 2610 总条目、去 test 2384），会在链接全绿后把整轮判红且不产总包（校验先于总 tar）——P6 预跑镜头本机 tar -tzf 逐条统计拦下，2026-11-22"},
+        {'file': '(不落源码) 脚本产物解析：libnode 实体名三路解析',
+         'change': "libnode 产物路径由写死 out/Release/libnode.so 改为「精确名→libnode.so.* 通配→lib/libnode.so* 兜底」三路解析，命中记实体名 + SONAME 进 build-log",
+         'reason': "--shared 时 gyp product_extension = shlib_suffix = so.<node_module_version>（configure.py:1860-1865，v24 = so.137），gyp make 按 output_basename 把库 copy 到 PRODUCT_DIR，不生成无版本号 libnode.so（install.py:186-196 同认 libnode.<suffix>；node.gyp 无 postbuild）；轮24 SOLINK 行即 obj.target/libnode.so.137 实锤，原路径会在链接全绿后误报产物缺失且整轮退出，2026-11-22"},
     ],
     'licenses': {'node': 'MIT', 'npm': 'Artistic-2.0',
                  'npmDepsManifest': 'license-manifest.json'},
