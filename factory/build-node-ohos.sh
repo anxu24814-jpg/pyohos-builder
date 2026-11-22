@@ -1536,6 +1536,9 @@ json.dump({
         {'file': 'tools/v8_gypfiles/v8.gyp',
          'change': "v8_base_without_compiler 的 link_settings.libraries 去 -latomic（条件文本不动；musl sysroot 无此库）",
          'reason': "编译面全绿后仅剩链接红：libnode.so / node_mksnapshot 报 ld.lld unable to find -latomic（link_settings 自 v8 依赖传播到全部下游链接目标；补丁3 只覆盖 node.gyp 的 node 可执行目标），run 45023953328 实锤；安全性本机实查 = SDK 无任何 libatomic 文件，而 libclang_rt.builtins.a 含 __atomic_*_16 + __aarch64_cas16_* 20 个 outline-atomics 符号，2026-11-22"},
+        {'file': '(不落源码) 脚本自校验：npm 文件集下限 + 关键路径四钉',
+         'change': "npm-fileset.tar.gz 条目数下限 5000→2000，并新增关键路径四钉（npm/package.json、npm/bin/npm-cli.js、npm/lib/cli.js、npm/node_modules/ 树）",
+         'reason': "原 5000 下限源自「deps/npm 万级」误估（v24.22.3 实测 2610 总条目、去 test 2384），会在链接全绿后把整轮判红且不产总包（校验先于总 tar）——P6 预跑镜头本机 tar -tzf 逐条统计拦下，2026-11-22"},
     ],
     'licenses': {'node': 'MIT', 'npm': 'Artistic-2.0',
                  'npmDepsManifest': 'license-manifest.json'},
@@ -1620,8 +1623,19 @@ echo "$FILE_OUT" | grep -q 'ELF 64-bit LSB shared object' \
   || { echo "错误：file 形态异常：$FILE_OUT（预期 ELF 64-bit LSB shared object）。" >&2; exit 1; }
 echo "$FILE_OUT" | grep -q 'ARM aarch64' \
   || { echo "错误：file 架构异常：$FILE_OUT（预期 ARM aarch64）。" >&2; exit 1; }
-[ "$NPM_FILECOUNT" -ge 5000 ] \
-  || { echo "错误：npm-fileset.tar.gz 条目数 $NPM_FILECOUNT < 5000（deps/npm 全量去 test 应为万级——拷贝可能不完整）。" >&2; exit 1; }
+# 文件数下限口径修正（补丁18，2026-11-22）：v24.22.3 的 deps/npm 本机实查 = 2610 条目，
+# 去各级 test 后 = 2384（1926 文件 + 458 目录，tar -tzf 逐条统计）；原 ≥5000 下限来自
+# 「deps/npm 全量应为万级」的误估（实际万级是含 test 与文档源的 git 树口径），会在编译
+# 全绿后把整轮判红且不产总包。改为 2000 保守下限（对实测留 ~16% 余量防拷贝截断）+
+# 关键路径存在性四钉（纯计数抓不到「拷了但缺核心」的残缺）。
+[ "$NPM_FILECOUNT" -ge 2000 ] \
+  || { echo "错误：npm-fileset.tar.gz 条目数 $NPM_FILECOUNT < 2000（deps/npm 去 test 实测 2384，拷贝可能不完整）。" >&2; exit 1; }
+for k in npm/package.json npm/bin/npm-cli.js npm/lib/cli.js; do
+  tar -tzf "$OUT_DIR/npm-fileset.tar.gz" | grep -qx "$k" \
+    || { echo "错误：npm-fileset.tar.gz 缺关键条目 $k（npm 包残缺）。" >&2; exit 1; }
+done
+tar -tzf "$OUT_DIR/npm-fileset.tar.gz" | grep -q '^npm/node_modules/' \
+  || { echo "错误：npm-fileset.tar.gz 缺 npm/node_modules/ 树（npm 依赖集未随包）。" >&2; exit 1; }
 # npm tar 顶层唯一目录 = npm/
 BAD_TOP="$(tar -tzf "$OUT_DIR/npm-fileset.tar.gz" | awk -F/ '{print $1}' | sort -u | grep -vx 'npm' || true)"
 [ -z "$BAD_TOP" ] || { echo "错误：npm-fileset.tar.gz 顶层目录不唯一：$BAD_TOP（预期仅 npm/）。" >&2; exit 1; }
@@ -1634,7 +1648,7 @@ BAD_TOP="$(tar -tzf "$OUT_DIR/npm-fileset.tar.gz" | awk -F/ '{print $1}' | sort 
   echo "2. INTERP 段数：$INTERP_N —— PASS"
   echo "3. node5Start 符号：$(wc -l < "$OUT_DIR/node-start-symbols.txt") 处命中 —— PASS"
   echo "4. NEEDED 白名单：$(wc -l < "$OUT_DIR/needed.txt") 条全过（含 libc++_shared.so）—— PASS"
-  echo "附加：七件非零字节 + file 形态 + npm 条目 $NPM_FILECOUNT ≥ 5000 + 顶层唯一 npm/ —— PASS"
+  echo "附加：七件非零字节 + file 形态 + npm 条目 $NPM_FILECOUNT ≥ 2000 + 关键路径四钉 + 顶层唯一 npm/ —— PASS"
 } >> "$OUT_DIR/build-log.txt"
 
 # ================= 收尾：总 tar + 字节数表 =================
