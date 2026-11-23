@@ -1434,7 +1434,14 @@ for root, dirs, files in os.walk(src):
 print(f"npm fileset: {copied} files copied")
 PYEOF
 tar -czf "$OUT_DIR/npm-fileset.tar.gz" -C "$STAGE" npm
-NPM_FILECOUNT="$(tar -tzf "$OUT_DIR/npm-fileset.tar.gz" | wc -l)"
+# 条目清单落盘一次（补丁22，run 45084892593 实锤）：`tar -tzf ... | grep -qx` 的 grep -q 命中
+# 首条即退出关管道 → GNU tar 写 stdout 得 EPIPE 报 "tar: stdout: write error" exit 2 →
+# `set -o pipefail` 把整个管道判红（尽管 grep 已匹配成功），曾误报「缺关键条目
+# npm/package.json」整轮退出。改为先全量列条目到文件，后续四钉/顶层检查一律 grep 文件；
+# 同时省掉 4 次 80MB tar 全量解压（性能副作用为正）。本地 Git Bash tar 不报 write error，
+# 故本机预跑未拦住——CI 与本地 tar 行为差异，预跑清单登记此项。
+tar -tzf "$OUT_DIR/npm-fileset.tar.gz" > "$OUT_DIR/npm-entries.txt"
+NPM_FILECOUNT="$(wc -l < "$OUT_DIR/npm-entries.txt")"
 log "npm-fileset.tar.gz：$NPM_FILECOUNT 个 tar 条目"
 
 # #3 include-embed.tar.gz：src/*.h + deps/v8/include/ 全树 + deps/uv/include/ 全树
@@ -1602,6 +1609,9 @@ json.dump({
         {'file': 'deps/cares/config/linux/ares_config.h',
          'change': "HAVE_GETSERVBYPORT_R 由 define 改为 undef（c-ares 回退 getservbyport；与上游 config/openharmony/ares_config.h 逐字对齐）",
          'reason': "OS=linux 交叉编译使 cares.gyp 选 linux 配置（define 该宏），而 OHOS musl 无 getservbyport_r——SDK 实查 libc.so 只导出 getservbyname/getservbyport、libc.a 无 getservbyport_r.o；round 28 编译全绿 + libnode.so.137 SOLINK 成功后，5 个链接目标（node_mksnapshot/embedtest/shared_embedtest/node/cctest）仅因该符号红（run 45039296873 实锤）；上游随包 openharmony 配置与 linux 版唯一差异即此处 undef（本机 diff 实证），2026-11-23"},
+        {'file': '(不落源码) 脚本自校验：npm 条目清单落盘',
+         'change': "npm 四钉/顶层检查由 `tar -tzf … | grep -q` 直连改为先 `tar -tzf … > npm-entries.txt` 再 grep 文件（条目数同源取 wc -l）",
+         'reason': "run 45084892593 实锤：管道中 grep -q 命中首条即退出关管道 → GNU tar 写 stdout 得 EPIPE 报 `tar: stdout: write error` exit 2 → `set -o pipefail` 把已匹配成功的检查判红，误报「缺关键条目 npm/package.json」整轮退出（该轮 make 全目标链接、四校验前三条、npm/include 打包、license/manifest 全过）；顺带把 4 次 80MB tar 全量解压降为 1 次；本地 Git Bash 的 tar 不报 write error，故预跑未拦住（CI/本地 tar 行为差异），2026-11-23"},
     ],
     'licenses': {'node': 'MIT', 'npm': 'Artistic-2.0',
                  'npmDepsManifest': 'license-manifest.json'},
@@ -1693,14 +1703,15 @@ echo "$FILE_OUT" | grep -q 'ARM aarch64' \
 # 关键路径存在性四钉（纯计数抓不到「拷了但缺核心」的残缺）。
 [ "$NPM_FILECOUNT" -ge 2000 ] \
   || { echo "错误：npm-fileset.tar.gz 条目数 $NPM_FILECOUNT < 2000（deps/npm 去 test 实测 2384，拷贝可能不完整）。" >&2; exit 1; }
+# 四钉与顶层检查一律对 npm-entries.txt（补丁22：禁 tar|grep -q 直连——SIGPIPE + pipefail 见上）
 for k in npm/package.json npm/bin/npm-cli.js npm/lib/cli.js; do
-  tar -tzf "$OUT_DIR/npm-fileset.tar.gz" | grep -qx "$k" \
+  grep -qx "$k" "$OUT_DIR/npm-entries.txt" \
     || { echo "错误：npm-fileset.tar.gz 缺关键条目 $k（npm 包残缺）。" >&2; exit 1; }
 done
-tar -tzf "$OUT_DIR/npm-fileset.tar.gz" | grep -q '^npm/node_modules/' \
+grep -q '^npm/node_modules/' "$OUT_DIR/npm-entries.txt" \
   || { echo "错误：npm-fileset.tar.gz 缺 npm/node_modules/ 树（npm 依赖集未随包）。" >&2; exit 1; }
 # npm tar 顶层唯一目录 = npm/
-BAD_TOP="$(tar -tzf "$OUT_DIR/npm-fileset.tar.gz" | awk -F/ '{print $1}' | sort -u | grep -vx 'npm' || true)"
+BAD_TOP="$(awk -F/ '{print $1}' "$OUT_DIR/npm-entries.txt" | sort -u | grep -vx 'npm' || true)"
 [ -z "$BAD_TOP" ] || { echo "错误：npm-fileset.tar.gz 顶层目录不唯一：$BAD_TOP（预期仅 npm/）。" >&2; exit 1; }
 
 # 校验结论进 build-log
