@@ -1370,10 +1370,11 @@ if [ -z "$MARCH_HIT" ]; then
 fi
 log "补丁生效自检过：march 旗已进生成物（$MARCH_HIT）"
 
-log "make -j4 -k（显式覆盖 2 核 nproc：-j2 实测 150 分钟未编完，run 44884007284 闸杀；4 并发 cc1plus 峰值 ~8G < 16G 内存）；构建前磁盘：$(df -h "$OUT_DIR" | tail -1 | awk '{print "avail="$4}')"
+log "make -j4 -k（4 核 runner；历史 2 核 -j2 实测 150 分钟未编完被闸杀，run 44884007284；4 并发 cc1plus 峰值 ~8G < 16G 内存）；构建前磁盘：$(df -h "$OUT_DIR" | tail -1 | awk '{print "avail="$4}')"
 # -k（keep-going）自轮 21 后开启：此前失败点都在 configure/补丁/V8 前中段，-k 只浪费时间；
 # 轮 19/20/21 已推进到 V8 中后段（TMP 库/turboshaft），首个红 TU 挡住同批独立 TU 的错误面
-# → 用一次跑满换多层暴露。失败轮耗时会接近全量编译（估 150~175 分钟），闸 240 有余量。
+# → 用一次跑满换多层暴露。失败轮耗时会接近全量编译（轮 29 实测全链 211 分钟），
+# 闸 300（build-node.yml timeout-minutes）留 ~1.4x 余量。
 make -C "$NODE_SRC" -j4 -k > "$LOGS/build.log" 2>&1
 log "构建后磁盘：$(df -h "$OUT_DIR" | tail -1 | awk '{print "avail="$4}')（P6 预跑 P2-3 磁盘峰值观测）"
 {
@@ -1402,7 +1403,9 @@ if [ -z "$LIBNODE" ]; then
 fi
 log "libnode 实体解析：$LIBNODE"
 log "libnode SONAME：$("$READELF" -d "$LIBNODE" | awk '/SONAME/{print $NF}')（门 1/2 dlopen 绝对路径加载，SONAME 不影响）"
-# 官方 --shared 产物已预 strip，不再 strip（任务书 §3 #1）
+# 不 strip、按构建原样入包（门 0 实测口径更正，2026-11-23）：轮 29 `file` 实测
+# "with debug_info, not stripped"（133.7MB），原「官方 --shared 产物已预 strip」前提不成立；
+# 是否 strip 属门 2 打包决策（任务书 §3 #1）。
 
 # ================= e. 产物六件生成（任务书 §3）=================
 STAGE="$OUT_DIR/stage"
@@ -1686,7 +1689,7 @@ while IFS= read -r lib; do
 done < "$OUT_DIR/needed.txt"
 [ "$BAD_NEEDED" = "0" ] || exit 1
 
-log "附加校验：六件非零字节 + file 形态 + npm 文件数下限"
+log "附加校验：七件非零字节（六件产物 + node-build-env.txt）+ file 形态 + npm 文件数下限"
 for f in libnode.so npm-fileset.tar.gz include-embed.tar.gz manifest.json license-manifest.json build-log.txt node-build-env.txt; do
   [ -s "$OUT_DIR/$f" ] || { echo "错误：产物缺失或零字节：$OUT_DIR/$f。" >&2; exit 1; }
 done
