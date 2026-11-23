@@ -24,9 +24,9 @@
 # sdk-warm：只做 SDK 下载+缓存预热，必绿，首轮 ~10 分钟（3.42GB 下载 + 解压 linux 侧 native）；
 # build-node：needs sdk-warm。实测前置步（缓存恢复+源码下载解压+补丁）~15 分钟，make
 # 在 2 核 runner 实测 150 分钟仍未编完（run 44884007284 闸杀时 cc1plus 活跃）——改显式
-# -j4（2 核超卖，4 并发 cc1plus 峰值 ~8G < 16G 内存）提速；timeout 240 分钟
-# （-j4 预计 90~120 分钟 + 前置 15 + 校验打包 5，留 2x 余量；85→150 两轮闸杀教训
-# 2026-11-21：cancelled 即超时形态，别再贴边设闸）；
+# -j4（2 核超卖，4 并发 cc1plus 峰值 ~8G < 16G 内存）提速；timeout 300 分钟
+# （轮 29 实测全链 211 分钟：make 全目标编译+链接 + 打包 + 校验；-j4 下编译段波动 ±20%
+# 仍留 ~1.4x 余量；85→150 两轮闸杀教训 2026-11-21：cancelled 即超时形态，别再贴边设闸）；
 # runner 内存 16GB（2026-11 公开口径）远超 node BUILDING.md 的 8GB 线，
 # OOM 风险低；磁盘 ~14GB 可用（SDK 3-4GB 缓存 + node 源码/构建树 3-6GB + npm tar ~80MB）。
 name: build-node-ohos
@@ -82,7 +82,7 @@ jobs:
   build-node:
     needs: sdk-warm
     runs-on: ubuntu-24.04
-    timeout-minutes: 240
+    timeout-minutes: 300
     steps:
       - name: Checkout
         uses: actions/checkout@v4
